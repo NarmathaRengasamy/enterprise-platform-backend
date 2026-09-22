@@ -2,6 +2,22 @@ import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { store } from '../data/store.js';
 import { AppError } from '../middlewares/errorHandler.js';
+import { createLogger } from '../utils/logger.js';
+import { toAppError } from '../utils/error.util.js';
+import { generateId, getPageParams, ok, paginated } from '../utils/response.util.js';
+
+const log = createLogger('KnowledgeController');
+const WORDS_PER_MINUTE = 200;
+
+/** Seed rows store views as "2,420"; newer rows store a number. */
+const parseViews = (value: unknown): number =>
+  typeof value === 'number' ? value : parseInt(String(value ?? '0').replace(/,/g, ''), 10) || 0;
+
+/** Derived from the content instead of the hardcoded '3 min read'. */
+const readTimeOf = (content: string): string => {
+  const words = String(content ?? '').trim().split(/\s+/).filter(Boolean).length;
+  return `${Math.max(1, Math.ceil(words / WORDS_PER_MINUTE))} min read`;
+};
 import { Article, Collection } from '../types/index.js';
 
 export const createArticleSchema = z.object({
@@ -43,19 +59,87 @@ export const getArticles = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const { category, search } = req.query;
-    const articles = await store.getArticles({
+    const { page, limit, skip } = getPageParams(req);
+    const { category, search, sortBy, sortOrder } = req.query;
+    let articles = await store.getArticles({
       category: category as string,
       search: search as string,
     });
 
-    res.status(200).json({
-      success: true,
-      total: articles.length,
-      data: articles,
-    });
+    if (sortBy === 'title') {
+      const dir = sortOrder === 'desc' ? -1 : 1;
+      articles = [...articles].sort((a, b) => a.title.localeCompare(b.title) * dir);
+    } else if (sortBy === 'views') {
+      const dir = sortOrder === 'asc' ? 1 : -1;
+      articles = [...articles].sort((a, b) => (parseViews(a.views) - parseViews(b.views)) * dir);
+    }
+
+    res.status(200).json(
+      paginated(articles.slice(skip, skip + limit), articles.length, page, limit)
+    );
   } catch (error) {
     next(error);
+  }
+};
+
+export const bulkDeleteArticlesSchema = z.object({
+  body: z.object({ ids: z.array(z.string()).min(1, 'ids must not be empty') }),
+});
+
+export const bulkDeleteArticles = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const ids = req.body.ids as string[];
+    let deleted = 0;
+    for (const id of ids) {
+      if (await store.deleteArticle(id)) deleted += 1;
+    }
+    log.log(`Bulk deleted ${deleted} article(s)`);
+    res
+      .status(200)
+      .json(ok({ deleted, notFound: ids.length - deleted }, 'Bulk delete completed'));
+  } catch (error) {
+    next(toAppError(error, 'Could not complete the bulk delete', log));
+  }
+};
+
+/** Counts a read. Separate so a view never rewrites the whole document. */
+export const recordArticleView = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const article = await store.getArticleById(req.params.id);
+    if (!article) throw new AppError('Article not found', 404);
+
+    const views = parseViews(article.views) + 1;
+    await store.updateArticle(req.params.id, { views } as any);
+    res.status(200).json(ok({ id: req.params.id, views }));
+  } catch (error) {
+    next(toAppError(error, `Could not record a view for ${req.params.id}`, log));
+  }
+};
+
+export const getKnowledgeStats = async (
+  _req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const articles = await store.getArticles();
+    res.status(200).json(
+      ok({
+        totalArticles: articles.length,
+        totalViews: articles.reduce((sum, a) => sum + parseViews(a.views), 0),
+        activeCategories: new Set(articles.map((a) => a.category)).size,
+      })
+    );
+  } catch (error) {
+    next(toAppError(error, 'Could not compute knowledge statistics', log));
   }
 };
 
@@ -94,7 +178,8 @@ export const createArticle = async (
       title,
       category,
       categoryColor: categoryColor || 'primary',
-      readTime: readTime || '3 min read',
+      /* Derived from the content unless the caller insists on a value. */
+      readTime: readTime || readTimeOf(content ?? ''),
       visibility: visibility || 'Public article',
       updated: 'Just now',
       icon: icon || 'article',

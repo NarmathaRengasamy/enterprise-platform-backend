@@ -2,6 +2,11 @@ import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { store } from '../data/store.js';
 import { AppError } from '../middlewares/errorHandler.js';
+import { createLogger } from '../utils/logger.js';
+import { toAppError } from '../utils/error.util.js';
+import { ok } from '../utils/response.util.js';
+
+const log = createLogger('ScheduleController');
 import { ScheduleEvent } from '../types/index.js';
 
 export const createEventSchema = z.object({
@@ -54,9 +59,11 @@ export const getEvents = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const { dateKey, participantType, status } = req.query;
+    const { dateKey, dateFrom, dateTo, participantType, status } = req.query;
     const events = await store.getScheduleEvents({
       dateKey: dateKey as string,
+      dateFrom: dateFrom as string,
+      dateTo: dateTo as string,
       participantType: participantType as string,
       status: status as string,
     });
@@ -68,6 +75,57 @@ export const getEvents = async (
     });
   } catch (error) {
     next(error);
+  }
+};
+
+/**
+ * Accepts "09:00" and "09:00 AM"; both appear in the existing data.
+ * Rejects an inverted range instead of silently coercing it to start+60min,
+ * which is what the UI does today.
+ */
+const assertTimeRange = (start?: string, end?: string): void => {
+  if (!start || !end) return;
+
+  const toMinutes = (value: string): number | null => {
+    const match = value.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i);
+    if (!match) return null;
+    let hours = parseInt(match[1], 10);
+    const minutes = parseInt(match[2], 10);
+    const meridiem = match[3]?.toUpperCase();
+    if (meridiem === 'PM' && hours < 12) hours += 12;
+    if (meridiem === 'AM' && hours === 12) hours = 0;
+    return hours * 60 + minutes;
+  };
+
+  const from = toMinutes(start);
+  const to = toMinutes(end);
+  if (from === null || to === null) return;
+  if (to <= from) throw new AppError('endTime must be later than startTime', 400);
+};
+
+/** Counts behind the All / Human / Agent / Customer filter tabs. */
+export const getScheduleStats = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const { dateFrom, dateTo } = req.query;
+    const events = await store.getScheduleEvents({
+      dateFrom: dateFrom as string,
+      dateTo: dateTo as string,
+    });
+
+    res.status(200).json(
+      ok({
+        all: events.length,
+        human: events.filter((e) => e.participantType === 'human').length,
+        agent: events.filter((e) => e.participantType === 'agent').length,
+        customer: events.filter((e) => e.participantType === 'customer').length,
+      })
+    );
+  } catch (error) {
+    next(toAppError(error, 'Could not compute schedule statistics', log));
   }
 };
 
@@ -100,6 +158,7 @@ export const createEvent = async (
 ): Promise<void> => {
   try {
     const body = req.body;
+    assertTimeRange(body.startTime, body.endTime);
     const dateObj = new Date(body.dateKey);
     const dayIndex = body.dayIndex !== undefined ? body.dayIndex : (dateObj.getDay() + 6) % 7; // Monday = 0
     const dateNum = body.dateNum !== undefined ? body.dateNum : dateObj.getDate();

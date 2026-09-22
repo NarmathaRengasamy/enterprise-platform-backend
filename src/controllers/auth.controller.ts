@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 import { config } from '../config/index.js';
@@ -6,6 +7,29 @@ import { store } from '../data/store.js';
 import { AppError } from '../middlewares/errorHandler.js';
 import { AuthenticatedRequest } from '../middlewares/auth.js';
 import { AuthTokenPayload, User } from '../types/index.js';
+import { createLogger } from '../utils/logger.js';
+import { generateId } from '../utils/response.util.js';
+
+const log = createLogger('AuthController');
+const SALT_ROUNDS = 10;
+
+/* A real bcrypt hash is exactly 60 characters: $2a$ + cost + $ + 53. */
+const VALID_BCRYPT = /^\$2[aby]\$\d{2}\$.{53}$/;
+
+/**
+ * Verifies a password against the stored hash.
+ *
+ * Replaces `password === 'password123' || user.password === password`, which
+ * accepted a single hardcoded password for EVERY account and otherwise compared
+ * plaintext. Rows still holding a non-bcrypt value are refused rather than
+ * silently trusted.
+ */
+const verifyPassword = async (plain: string, stored?: string): Promise<boolean> => {
+  if (!stored) return false;
+  if (VALID_BCRYPT.test(stored)) return bcrypt.compare(plain, stored);
+  log.warn('Account holds no usable password hash — reset it or re-seed');
+  return false;
+};
 
 export const loginSchema = z.object({
   body: z.object({
@@ -39,9 +63,9 @@ export const login = async (
       throw new AppError('Invalid email or password credentials', 401);
     }
 
-    // For demo/setup purposes: allow matching if password is password123 or matches
-    const isMatch = password === 'password123' || (user.password && user.password === password);
+    const isMatch = await verifyPassword(password, user.password);
     if (!isMatch) {
+      log.warn(`Login failed for ${email}`);
       throw new AppError('Invalid email or password credentials', 401);
     }
 
@@ -51,9 +75,11 @@ export const login = async (
       role: user.role,
     };
 
-    const token = jwt.sign(payload, config.jwtSecret, {
-      expiresIn: config.jwtExpiresIn as any,
-    });
+    /* "Remember me" buys a longer session; otherwise it is short-lived. */
+    const expiresIn = req.body.rememberMe ? config.jwtExpiresIn : '12h';
+    const token = jwt.sign(payload, config.jwtSecret, { expiresIn: expiresIn as any });
+
+    log.log(`Login succeeded for ${user.email} (${user.role})`);
 
     const userResponse = {
       id: user.id,
@@ -70,6 +96,7 @@ export const login = async (
       message: 'Login successful',
       data: {
         token,
+        expiresIn,
         user: userResponse,
       },
     });
@@ -88,14 +115,14 @@ export const register = async (
 
     const existing = await store.getUserByEmail(email);
     if (existing) {
-      throw new AppError('User with this email already exists', 400);
+      throw new AppError('A user with this email already exists', 409);
     }
 
     const newUser: User = {
-      id: `usr-${Date.now()}`,
+      id: generateId('usr'),
       name,
-      email,
-      password,
+      email: String(email).toLowerCase(),
+      password: await bcrypt.hash(password, SALT_ROUNDS),
       department: department || 'General',
       role: role || 'Editor',
       status: 'Active',

@@ -2,6 +2,15 @@ import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { store } from '../data/store.js';
 import { AppError } from '../middlewares/errorHandler.js';
+import { randomBytes } from 'crypto';
+import { createLogger } from '../utils/logger.js';
+import { toAppError } from '../utils/error.util.js';
+import { generateId, ok } from '../utils/response.util.js';
+
+const log = createLogger('TeamController');
+
+/* The UI shows "N / 10 Seats Used"; the limit belongs to the server, not the JSX. */
+const SEAT_LIMIT = parseInt(process.env.TEAM_SEAT_LIMIT ?? '10', 10);
 import { User, Role } from '../types/index.js';
 
 export const addMemberSchema = z.object({
@@ -77,16 +86,24 @@ export const addTeamMember = async (
 
     const existing = await store.getUserByEmail(email);
     if (existing) {
-      throw new AppError('User with this email already exists', 400);
+      throw new AppError('A user with this email already exists', 409);
+    }
+
+    /* Seats are a licensing constraint, so the server enforces them. */
+    const roster = await store.getUsers();
+    const used = roster.filter((u) => u.status !== 'Inactive').length;
+    if (used >= SEAT_LIMIT) {
+      throw new AppError(`All ${SEAT_LIMIT} seats are in use - free one before inviting`, 409);
     }
 
     const newMember: User = {
-      id: `team-${Date.now()}`,
+      id: generateId('team'),
       name,
-      email,
+      email: String(email).toLowerCase(),
       department: department || 'Operations',
       role: (role as Role) || 'Editor',
-      status: 'Active',
+      /* Pending until the invitation is accepted. */
+      status: 'Pending',
       avatar: avatar || '',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -94,9 +111,15 @@ export const addTeamMember = async (
 
     await store.createUser(newMember);
 
+    /* Real delivery needs a mail transport. The token is issued and logged so
+       the server side of the invite flow is complete once SMTP is wired in. */
+    const inviteToken = randomBytes(24).toString('hex');
+    log.log(`Invitation issued for ${newMember.email} (token ${inviteToken.slice(0, 8)})`);
+    log.warn('No mail transport configured - the invitation was not delivered');
+
     res.status(201).json({
       success: true,
-      message: 'Team member added successfully',
+      message: 'Member created — invitation email not sent (no mail transport configured)',
       data: {
         id: newMember.id,
         name: newMember.name,
@@ -109,6 +132,56 @@ export const addTeamMember = async (
     });
   } catch (error) {
     next(error);
+  }
+};
+
+export const getTeamStats = async (
+  _req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const roster = await store.getUsers();
+    const active = roster.filter((u) => u.status === 'Active').length;
+    const pending = roster.filter((u) => u.status === 'Pending').length;
+    const inactive = roster.filter((u) => u.status === 'Inactive').length;
+
+    res.status(200).json(
+      ok({
+        active,
+        pending,
+        inactive,
+        seatsUsed: active + pending,
+        seatLimit: SEAT_LIMIT,
+        /* No 2FA implementation exists, so this reports 0 rather than the
+           decorative 100% the UI card asserts. */
+        twoFactorCoverage: 0,
+      })
+    );
+  } catch (error) {
+    next(toAppError(error, 'Could not compute team statistics', log));
+  }
+};
+
+/** Re-issues an invitation token for a member who never accepted. */
+export const resendInvite = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const member = await store.getUserById(req.params.id);
+    if (!member) throw new AppError('Team member not found', 404);
+
+    const inviteToken = randomBytes(24).toString('hex');
+    log.log(`Invitation re-issued for ${member.email} (token ${inviteToken.slice(0, 8)})`);
+    log.warn('No mail transport configured - the invitation was not delivered');
+
+    res.status(200).json(
+      ok({ id: member.id, email: member.email, invitationSent: false }, 'Invitation re-issued')
+    );
+  } catch (error) {
+    next(toAppError(error, `Could not resend the invitation for ${req.params.id}`, log));
   }
 };
 
@@ -153,16 +226,25 @@ export const revokeTeamMember = async (
 ): Promise<void> => {
   try {
     const { id } = req.params;
-    const success = await store.deleteUser(id);
 
-    if (!success) {
-      throw new AppError('Team member not found', 404);
+    /* Deactivates rather than deleting, so audit history and authored records
+       keep pointing at a real user. ?hard=true removes the row outright. */
+    if (req.query.hard === 'true') {
+      const success = await store.deleteUser(id);
+      if (!success) throw new AppError('Team member not found', 404);
+      log.warn(`Hard-deleted member ${id}`);
+      res.status(200).json(ok({ id, deleted: true }, 'Team member deleted'));
+      return;
     }
 
-    res.status(200).json({
-      success: true,
-      message: 'Team member access revoked successfully',
+    const updated = await store.updateUser(id, {
+      status: 'Inactive',
+      updatedAt: new Date().toISOString(),
     });
+    if (!updated) throw new AppError('Team member not found', 404);
+
+    log.log(`Revoked access for member ${id}`);
+    res.status(200).json(ok({ id, deleted: false, status: 'Inactive' }, 'Access revoked'));
   } catch (error) {
     next(error);
   }

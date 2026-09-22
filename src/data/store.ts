@@ -1,4 +1,5 @@
 import { isDbConnected } from '../config/db.js';
+import { escapeRegex } from '../utils/response.util.js';
 import { UserModel } from '../models/User.model.js';
 import { ProductModel } from '../models/Product.model.js';
 import { CategoryModel } from '../models/Category.model.js';
@@ -100,34 +101,42 @@ class DataStore {
   }
 
   // ================= PRODUCTS =================
-  async getProducts(filters?: { category?: string; status?: string; search?: string }): Promise<Product[]> {
+  async getProducts(filters?: {
+    categoryId?: string;
+    category?: string;
+    status?: string;
+    search?: string;
+    sort?: Record<string, 1 | -1>;
+  }): Promise<Product[]> {
+    const sort = filters?.sort ?? { createdAt: -1 };
+
     if (isDbConnected()) {
       const query: any = {};
-      if (filters?.category && filters.category !== 'all' && filters.category !== 'All') {
-        query.$or = [
-          { category: { $regex: filters.category, $options: 'i' } },
-          { categoryCode: { $regex: filters.category, $options: 'i' } },
-        ];
+      /* categoryId is the real reference; the name filter stays for older clients. */
+      if (filters?.categoryId) {
+        query.categoryId = filters.categoryId;
+      } else if (filters?.category && filters.category !== 'all' && filters.category !== 'All') {
+        query.category = filters.category;
       }
       if (filters?.status && filters.status !== 'all' && filters.status !== 'All') {
-        query.stockStatus = { $regex: filters.status, $options: 'i' };
+        query.stockStatus = filters.status;
       }
       if (filters?.search) {
-        const regex = new RegExp(filters.search, 'i');
-        query.$or = [{ name: regex }, { sku: regex }, { description: regex }];
+        const regex = new RegExp(escapeRegex(filters.search), 'i');
+        query.$or = [{ name: regex }, { sku: regex }, { category: regex }];
       }
 
-      const docs = await ProductModel.find(query).sort({ createdAt: -1 }).lean();
-      if (docs && docs.length > 0) return docs as any;
+      /* An empty result is a legitimate answer — the old code fell through to the
+         seed array whenever the query matched nothing, so a filter that excluded
+         everything silently returned stale demo data. */
+      return (await ProductModel.find(query).sort(sort).lean()) as any;
     }
 
     let result = [...this.products];
-    if (filters?.category && filters.category !== 'all' && filters.category !== 'All') {
-      result = result.filter(
-        (p) =>
-          p.category.toLowerCase() === filters.category!.toLowerCase() ||
-          p.categoryCode?.toLowerCase() === filters.category!.toLowerCase()
-      );
+    if (filters?.categoryId) {
+      result = result.filter((p) => p.categoryId === filters.categoryId);
+    } else if (filters?.category && filters.category !== 'all' && filters.category !== 'All') {
+      result = result.filter((p) => p.category?.toLowerCase() === filters.category!.toLowerCase());
     }
     if (filters?.status && filters.status !== 'all' && filters.status !== 'All') {
       result = result.filter((p) => p.stockStatus.toLowerCase() === filters.status!.toLowerCase());
@@ -138,10 +147,17 @@ class DataStore {
         (p) =>
           p.name.toLowerCase().includes(q) ||
           p.sku.toLowerCase().includes(q) ||
-          p.description.toLowerCase().includes(q)
+          (p.category || '').toLowerCase().includes(q)
       );
     }
-    return result;
+
+    const [field, direction] = Object.entries(sort)[0] ?? ['createdAt', -1];
+    return result.sort((a: any, b: any) => {
+      const av = a[field];
+      const bv = b[field];
+      if (av === bv) return 0;
+      return (av > bv ? 1 : -1) * (direction === 1 ? 1 : -1);
+    });
   }
 
   async getProductById(id: string): Promise<Product | undefined> {
@@ -155,18 +171,10 @@ class DataStore {
   async createProduct(product: Product): Promise<Product> {
     if (isDbConnected()) {
       await ProductModel.create(product);
-      await CategoryModel.updateOne(
-        { $or: [{ id: product.categoryCode }, { name: product.category }] },
-        { $inc: { productsCount: 1 } }
-      );
     }
     this.products.unshift(product);
-    const cat = this.categories.find(
-      (c) =>
-        c.id.toLowerCase() === product.categoryCode.toLowerCase() ||
-        c.name.toLowerCase() === product.category.toLowerCase()
-    );
-    if (cat) cat.productsCount += 1;
+    /* productsCount is derived from the products collection on read, so there is
+       no stored counter to keep in step any more. */
     return product;
   }
 
@@ -184,24 +192,74 @@ class DataStore {
   async deleteProduct(id: string): Promise<boolean> {
     if (isDbConnected()) {
       const doc = await ProductModel.findOneAndDelete({ id }).lean();
-      if (doc) {
-        await CategoryModel.updateOne(
-          { $or: [{ id: (doc as any).categoryCode }, { name: (doc as any).category }] },
-          { $inc: { productsCount: -1 } }
-        );
-        return true;
-      }
+      if (doc) return true;
     }
     const index = this.products.findIndex((p) => p.id === id);
     if (index === -1) return false;
-    const removed = this.products.splice(index, 1)[0];
-    const cat = this.categories.find(
-      (c) =>
-        c.id.toLowerCase() === removed.categoryCode.toLowerCase() ||
-        c.name.toLowerCase() === removed.category.toLowerCase()
-    );
-    if (cat && cat.productsCount > 0) cat.productsCount -= 1;
+    this.products.splice(index, 1);
     return true;
+  }
+
+  /**
+   * Rewrites the denormalised category name on every product pointing at this
+   * category, so a rename cannot leave the two views disagreeing.
+   */
+  async renameProductCategory(categoryId: string, name: string): Promise<number> {
+    if (isDbConnected()) {
+      const res = await ProductModel.updateMany({ categoryId }, { category: name });
+      return res.modifiedCount ?? 0;
+    }
+    let touched = 0;
+    this.products = this.products.map((p) => {
+      if (p.categoryId !== categoryId) return p;
+      touched += 1;
+      return { ...p, category: name };
+    });
+    return touched;
+  }
+
+  /**
+   * Gives existing products the categoryId foreign key by matching their old
+   * free-text category name to a real category. Idempotent: only rows still
+   * missing the key are touched, so it is safe on every boot.
+   */
+  async backfillProductCategoryIds(): Promise<{ linked: number; orphans: string[] }> {
+    const categories = await this.getCategories();
+    const byName = new Map(categories.map((c) => [c.name.trim().toLowerCase(), c]));
+    const orphans: string[] = [];
+    let linked = 0;
+
+    if (isDbConnected()) {
+      const pending = await ProductModel.find({
+        $or: [{ categoryId: { $exists: false } }, { categoryId: '' }, { categoryId: null }],
+      }).lean();
+
+      for (const product of pending as any[]) {
+        const match = byName.get(String(product.category ?? '').trim().toLowerCase());
+        if (!match) {
+          orphans.push(`${product.id} (category "${product.category}")`);
+          continue;
+        }
+        await ProductModel.updateOne(
+          { id: product.id },
+          { categoryId: match.id, category: match.name, categoryCode: match.id }
+        );
+        linked += 1;
+      }
+      return { linked, orphans };
+    }
+
+    this.products = this.products.map((p) => {
+      if (p.categoryId) return p;
+      const match = byName.get(String(p.category ?? '').trim().toLowerCase());
+      if (!match) {
+        orphans.push(`${p.id} (category "${p.category}")`);
+        return p;
+      }
+      linked += 1;
+      return { ...p, categoryId: match.id, category: match.name, categoryCode: match.id };
+    });
+    return { linked, orphans };
   }
 
   // ================= CATEGORIES =================
@@ -377,12 +435,22 @@ class DataStore {
   // ================= SCHEDULE / APPOINTMENTS =================
   async getScheduleEvents(filters?: {
     dateKey?: string;
+    /* Inclusive range — the Week view needs 7 days and Month up to 42, so a
+       single exact dateKey forced the client to fetch the whole collection. */
+    dateFrom?: string;
+    dateTo?: string;
     participantType?: string;
     status?: string;
   }): Promise<ScheduleEvent[]> {
     if (isDbConnected()) {
       const query: any = {};
-      if (filters?.dateKey) query.dateKey = filters.dateKey;
+      if (filters?.dateKey) {
+        query.dateKey = filters.dateKey;
+      } else if (filters?.dateFrom || filters?.dateTo) {
+        query.dateKey = {};
+        if (filters.dateFrom) query.dateKey.$gte = filters.dateFrom;
+        if (filters.dateTo) query.dateKey.$lte = filters.dateTo;
+      }
       if (filters?.participantType && filters.participantType !== 'all') {
         query.participantType = filters.participantType;
       }
@@ -396,6 +464,12 @@ class DataStore {
     let result = [...this.scheduleEvents];
     if (filters?.dateKey) {
       result = result.filter((e) => e.dateKey === filters.dateKey);
+    } else if (filters?.dateFrom || filters?.dateTo) {
+      result = result.filter(
+        (e) =>
+          (!filters.dateFrom || e.dateKey >= filters.dateFrom) &&
+          (!filters.dateTo || e.dateKey <= filters.dateTo)
+      );
     }
     if (filters?.participantType && filters.participantType !== 'all') {
       result = result.filter((e) => e.participantType === filters.participantType);
@@ -620,10 +694,14 @@ class DataStore {
 
   // ================= DASHBOARD METRICS =================
   async getDashboardMetrics(): Promise<DashboardMetrics> {
-    const products = await this.getProducts();
-    const conversations = await this.getConversations();
-    const scheduleEvents = await this.getScheduleEvents();
-    const agents = await this.getAgents();
+    const [products, categories, conversations, scheduleEvents, users, agents] = await Promise.all([
+      this.getProducts(),
+      this.getCategories(),
+      this.getConversations(),
+      this.getScheduleEvents(),
+      this.getUsers(),
+      this.getAgents(),
+    ]);
 
     const totalProducts = products.length;
     const productsInStock = products.filter((p) => p.stockStatus === 'In Stock').length;
@@ -635,6 +713,13 @@ class DataStore {
     const activeAgents = agents.filter((a) => a.status === 'Active').length;
 
     return {
+      /* The cards also need category and team counts, and a server clock so the
+         header stops hardcoding "Today: 12 Sep 2026". */
+      totalCategories: categories.length,
+      totalTeamMembers: users.length,
+      activeTeamMembers: users.filter((u) => u.status === 'Active').length,
+      confirmedAppointments: upcomingAppointments,
+      serverDate: new Date().toISOString(),
       totalProducts,
       productsInStock,
       productsLowStock,

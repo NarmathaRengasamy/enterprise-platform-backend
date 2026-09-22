@@ -18,7 +18,13 @@ const ProductSchema = new Schema<Product>(
     name: { type: String, required: true, index: true },
     shortName: { type: String, default: '' },
     sku: { type: String, required: true, unique: true, index: true },
+    /* Foreign key to Category.id — the single source of truth for a product's
+       classification. Every write resolves it against the categories collection. */
+    categoryId: { type: String, required: true, index: true },
+    /* Denormalised category name, maintained by the server so list and detail
+       views render without a join. Never accepted from a client. */
     category: { type: String, required: true, index: true },
+    /* Deprecated: kept as a mirror of categoryId for older clients. */
     categoryCode: { type: String, default: 'general' },
     price: { type: Number, required: true },
     originalPrice: { type: Number },

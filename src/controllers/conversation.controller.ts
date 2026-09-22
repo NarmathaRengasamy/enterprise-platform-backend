@@ -2,6 +2,11 @@ import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { store } from '../data/store.js';
 import { AppError } from '../middlewares/errorHandler.js';
+import { createLogger } from '../utils/logger.js';
+import { toAppError } from '../utils/error.util.js';
+import { getPageParams, ok, paginated } from '../utils/response.util.js';
+
+const log = createLogger('ConversationController');
 import { Conversation, Message } from '../types/index.js';
 import {
   fetchExternalConversations,
@@ -90,6 +95,53 @@ export const getConversations = async (
     });
   } catch (error) {
     next(error);
+  }
+};
+
+/** Backs the sidebar badge without pulling every thread down. */
+export const getUnreadCount = async (
+  _req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const conversations = await store.getConversations();
+    const withUnread = conversations.filter((c) => (c.unread || 0) > 0);
+    res.status(200).json(
+      ok({
+        threads: withUnread.length,
+        messages: withUnread.reduce((sum, c) => sum + (c.unread || 0), 0),
+      })
+    );
+  } catch (error) {
+    next(toAppError(error, 'Could not compute the unread count', log));
+  }
+};
+
+/** Paginates and searches within one thread, newest window last. */
+export const getConversationMessages = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const { page, limit } = getPageParams(req);
+    const conversation = await store.getConversationById(req.params.id);
+    if (!conversation) throw new AppError('Conversation not found', 404);
+
+    let messages = conversation.messages ?? [];
+    if (req.query.search) {
+      const needle = String(req.query.search).toLowerCase();
+      messages = messages.filter((m: any) => String(m.text ?? '').toLowerCase().includes(needle));
+    }
+
+    const total = messages.length;
+    const start = Math.max(0, total - page * limit);
+    const end = Math.max(0, total - (page - 1) * limit);
+
+    res.status(200).json(paginated(messages.slice(start, end), total, page, limit));
+  } catch (error) {
+    next(toAppError(error, `Could not load messages for ${req.params.id}`, log));
   }
 };
 

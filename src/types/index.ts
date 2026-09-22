@@ -58,7 +58,11 @@ export interface Product {
   name: string;
   shortName?: string;
   sku: string;
+  /** Foreign key to Category.id. */
+  categoryId: string;
+  /** Display name, derived by the server from categoryId. */
   category: string;
+  /** @deprecated mirror of categoryId */
   categoryCode: string;
   price: number;
   originalPrice?: number;
@@ -235,6 +239,11 @@ export interface WebhookEndpoint {
 }
 
 export interface DashboardMetrics {
+  totalCategories?: number;
+  totalTeamMembers?: number;
+  activeTeamMembers?: number;
+  confirmedAppointments?: number;
+  serverDate?: string;
   totalProducts: number;
   productsInStock: number;
   productsLowStock: number;
