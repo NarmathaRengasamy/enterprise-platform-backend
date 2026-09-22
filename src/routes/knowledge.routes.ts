@@ -1,44 +1,60 @@
-import { Router } from 'express';
+import { Router, raw } from 'express';
 import {
-  getArticles,
-  getArticleById,
-  createArticle,
-  updateArticle,
-  deleteArticle,
-  bulkDeleteArticles,
-  recordArticleView,
+  listFiles,
+  uploadMarkdown,
+  uploadMarkdownSchema,
   getKnowledgeStats,
-  getCollections,
-  createCollection,
-  generateCatalogMarkdown,
-  createArticleSchema,
-  updateArticleSchema,
-  createCollectionSchema,
-  bulkDeleteArticlesSchema,
-} from '../controllers/knowledge.controller.js';
+  uploadFile,
+  deleteFile,
+  listFolders,
+  createFolder,
+  createFolderSchema,
+  generateCatalog,
+  generateCatalogSchema,
+} from '../controllers/kb.controller.js';
+import { requirePlatformConnection } from '../controllers/platform.controller.js';
 import { validateRequest } from '../middlewares/validate.js';
 import { requireRoles } from '../middlewares/auth.js';
 
 const router = Router();
 
+/* The knowledge base is the Perfox workspace, not a local collection, so every
+   route here needs the platform connection the Developer hub configures. */
+router.use(requirePlatformConnection);
+
 router.get('/stats', getKnowledgeStats);
 
-router.get('/articles', getArticles);
+/* Folders are chosen when a file is uploaded, not configured up front, so they
+   belong to the knowledge base rather than to the developer hub. */
+router.get('/folders', listFolders);
+router.post('/folders', requireRoles('Admin', 'Editor'), validateRequest(createFolderSchema), createFolder);
+
+router.get('/files', listFiles);
 router.post(
-  '/articles/bulk-delete',
+  '/files',
   requireRoles('Admin', 'Editor'),
-  validateRequest(bulkDeleteArticlesSchema),
-  bulkDeleteArticles
+  validateRequest(uploadMarkdownSchema),
+  uploadMarkdown
 );
-router.get('/articles/:id', getArticleById);
-router.post('/articles', requireRoles('Admin', 'Editor'), validateRequest(createArticleSchema), createArticle);
-router.put('/articles/:id', requireRoles('Admin', 'Editor'), validateRequest(updateArticleSchema), updateArticle);
-router.delete('/articles/:id', requireRoles('Admin', 'Editor'), deleteArticle);
-router.post('/articles/:id/view', recordArticleView);
 
-router.get('/collections', getCollections);
-router.post('/collections', requireRoles('Admin', 'Editor'), validateRequest(createCollectionSchema), createCollection);
+/* The file arrives as a raw byte stream, not multipart: the server rebuilds the
+   multipart request for Perfox so the target folder is its decision, not the
+   caller's. express.json() ignores this content type, so it reaches here intact. */
+router.post(
+  '/files/upload',
+  requireRoles('Admin', 'Editor'),
+  raw({ type: 'application/octet-stream', limit: '25mb' }),
+  uploadFile
+);
 
-router.post('/sync', requireRoles('Admin', 'Editor'), generateCatalogMarkdown);
+/* Compiles the catalogue server-side and uploads it as one document. */
+router.post(
+  '/catalog',
+  requireRoles('Admin', 'Editor'),
+  validateRequest(generateCatalogSchema),
+  generateCatalog
+);
+
+router.delete('/files/:id', requireRoles('Admin', 'Editor'), deleteFile);
 
 export default router;

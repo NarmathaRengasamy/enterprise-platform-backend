@@ -21,8 +21,21 @@ export const connectDB = async (): Promise<boolean> => {
     });
 
     mongoose.connection.on('disconnected', () => {
-      console.warn('⚠️ [MongoDB Disconnected]');
+      console.warn('⚠️ [MongoDB Disconnected] — falling back to the in-memory store until it returns');
       isConnected = false;
+    });
+
+    /* Mongoose reconnects on its own, but nothing here used to notice: the flag
+       latched false on the first drop and never went back, so the service kept
+       serving in-memory data long after the database was healthy again. */
+    mongoose.connection.on('connected', () => {
+      isConnected = true;
+      console.log('✅ [MongoDB Connected]');
+    });
+
+    mongoose.connection.on('reconnected', () => {
+      isConnected = true;
+      console.log('✅ [MongoDB Reconnected]');
     });
 
     return true;
@@ -34,9 +47,10 @@ export const connectDB = async (): Promise<boolean> => {
   }
 };
 
-export const isDbConnected = (): boolean => {
-  return isConnected && mongoose.connection.readyState === 1;
-};
+/* readyState is the live truth; the flag only records that a connection was
+   established at least once. Requiring both is what made a recovered connection
+   look permanently dead. */
+export const isDbConnected = (): boolean => mongoose.connection.readyState === 1;
 
 export const disconnectDB = async (): Promise<void> => {
   if (isConnected) {

@@ -1,14 +1,14 @@
 import { createApp } from './app.js';
 import { config } from './config/index.js';
 import { connectDB, disconnectDB } from './config/db.js';
-import { seedDatabase } from './data/dbSeeder.js';
 import { runMigrations } from './data/migrations.js';
 
 const startServer = async () => {
   // Attempt to connect to local/configured MongoDB
   await connectDB();
-  // Auto-seed collections if empty
-  await seedDatabase();
+  /* No auto-seeding. Re-inserting demo rows whenever a collection reached zero
+     meant a collection you had deliberately emptied filled itself back up on
+     the next restart. Run `npm run seed` to load the demo data on purpose. */
   /* Repairs unusable password hashes and backfills the categoryId foreign key.
      Both are idempotent and safe to run on every boot. */
   await runMigrations();
