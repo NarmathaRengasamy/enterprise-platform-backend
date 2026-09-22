@@ -12,19 +12,16 @@ import {
   sendMessageSchema,
 } from '../controllers/conversation.controller.js';
 import {
-  assignEndpointsSchema,
-  createAgentSchema,
   createEndpointSchema,
-  updateAgentSchema,
-  updateAgentStatusSchema,
   updateEndpointSchema,
 } from '../controllers/developer.controller.js';
+import { savePlatformConnectionSchema } from '../controllers/platform.controller.js';
 import {
-  bulkDeleteArticlesSchema,
-  createArticleSchema,
-  createCollectionSchema,
-  updateArticleSchema,
-} from '../controllers/knowledge.controller.js';
+  createFolderSchema,
+  uploadMarkdownSchema,
+} from '../controllers/kb.controller.js';
+import { setAgentStatusSchema } from '../controllers/perfox.controller.js';
+import { generateCatalogSchema } from '../controllers/kb.controller.js';
 import { createProductSchema, updateProductSchema } from '../controllers/product.controller.js';
 import { createEventSchema, updateEventSchema } from '../controllers/schedule.controller.js';
 import { addMemberSchema, updateMemberSchema } from '../controllers/team.controller.js';
@@ -246,53 +243,31 @@ const schemas: Record<string, unknown> = {
     },
   },
 
-  Article: {
-    type: 'object',
-    properties: {
-      id: { type: 'string', example: 'art-1' },
-      title: { type: 'string' },
-      category: { type: 'string' },
-      readTime: { type: 'string', description: 'Derived from the content length.' },
-      visibility: { type: 'string' },
-      views: { oneOf: [{ type: 'integer' }, { type: 'string' }] },
-      updated: { type: 'string' },
-      content: { type: 'string' },
-    },
-  },
 
-  Collection: {
-    type: 'object',
-    properties: {
-      id: { type: 'string', example: 'col-1' },
-      title: { type: 'string' },
-      description: { type: 'string' },
-      articleCount: { type: 'integer' },
-      icon: { type: 'string' },
-      color: { type: 'string' },
-    },
-  },
 
   Agent: {
     type: 'object',
+    description:
+      'A cached copy of an agent in the connected Perfox workspace. Every field mirrors what Perfox reports; this service stores no configuration of its own against an agent.',
     properties: {
-      id: { type: 'string', example: 'agt-001' },
+      id: { type: 'string', example: '01a09017-e57c-753a-801a-6bc6c13c13ca', description: 'The Perfox agent id.' },
       name: { type: 'string' },
-      workflowId: { type: 'string' },
-      channel: { type: 'string' },
-      model: { type: 'string' },
-      siteKey: { type: 'string', description: 'Public by design — embedded in the browser widget.' },
-      secretKeyMasked: {
-        type: 'string',
-        example: 'sk_****9a3f',
-        description: 'The plaintext secret is returned only at create and rotate.',
-      },
-      accentColor: { type: 'string' },
-      position: { type: 'string', enum: ['bottom-right', 'bottom-left', 'embed-inline'] },
-      status: { type: 'string' },
-      totalCalls: { oneOf: [{ type: 'integer' }, { type: 'string' }] },
-      avgLatency: { type: 'string' },
-      assignedEndpoints: { type: 'array', items: { type: 'string' } },
       description: { type: 'string' },
+      status: {
+        type: 'string',
+        enum: ['published', 'paused', 'draft'],
+        description: "Perfox's own vocabulary, stored verbatim.",
+      },
+      channels: { type: 'array', items: { type: 'string' }, example: ['web'] },
+      activeVersion: { type: 'integer' },
+      nodeCount: { type: 'integer' },
+      perfoxCreatedAt: { type: 'string', format: 'date-time' },
+      perfoxUpdatedAt: { type: 'string', format: 'date-time' },
+      syncedAt: {
+        type: 'string',
+        format: 'date-time',
+        description: 'When this row was last refreshed from Perfox.',
+      },
     },
   },
 
@@ -314,6 +289,80 @@ const schemas: Record<string, unknown> = {
     },
   },
 
+  PlatformConnection: {
+    type: 'object',
+    description:
+      'The connection this tenant holds to Perfox. A singleton — one row, keyed `perfox`. The API token is never returned, only the masked hint in `apiTokenMasked`.',
+    properties: {
+      configured: { type: 'boolean', description: 'False when nothing is configured; every other field is then empty.' },
+      apiUrl: { type: 'string', format: 'uri', example: 'https://pradeepworkspace-api.perfox.ai/api/v1' },
+      apiTokenMasked: { type: 'string', example: 'sk_****d457' },
+      workspace: { type: 'string', example: 'pradeepworkspace', description: 'Derived from the API URL host.' },
+      status: { type: 'string', enum: ['Connected', 'Unverified', 'Error'] },
+      lastVerifiedAt: { type: 'string', format: 'date-time' },
+      lastError: { type: 'string', description: 'Why the last verification failed; empty when it succeeded.' },
+      connectedBy: { type: 'string', format: 'email' },
+      updatedAt: { type: 'string', format: 'date-time' },
+      source: {
+        type: 'string',
+        enum: ['stored', 'env', 'none'],
+        description: 'Where the connection in force came from. A stored row always wins over the environment.',
+      },
+      verifyPath: { type: 'string', example: '/kb/folders', description: 'The Perfox path used to verify the credentials.' },
+    },
+  },
+
+  PlatformVerification: {
+    type: 'object',
+    description: 'The result of calling Perfox. A rejected connection is a result, not an error — this never carries a non-200 HTTP status of its own.',
+    properties: {
+      ok: { type: 'boolean' },
+      reachable: { type: 'boolean' },
+      httpStatus: { type: 'integer', nullable: true, description: 'Null when the host never answered.' },
+      message: { type: 'string', description: 'Empty when the check succeeded.' },
+      latencyMs: { type: 'integer' },
+    },
+  },
+
+  KbFolder: {
+    type: 'object',
+    description:
+      "A folder in the Perfox knowledge base, read live. Perfox answers in snake_case and carries a large `index` block — the file manifest, entity lists and hashes — which is dropped at the boundary; only the count and summary survive.",
+    properties: {
+      id: { type: 'string', example: '01a0c813-682c-779f-9df8-23fb62f25368' },
+      name: { type: 'string', example: 'folder_CRM' },
+      parentId: { type: 'string', nullable: true, description: 'Null at the root.' },
+      path: { type: 'string' },
+      fileCount: { type: 'integer', description: 'Read from the `index.file_count` Perfox reports.' },
+      summary: { type: 'string', description: "Perfox's generated description of the contents, when it has one." },
+      createdAt: { type: 'string', format: 'date-time' },
+      updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
+  KbFile: {
+    type: 'object',
+    description:
+      'A file in the selected Perfox knowledge-base folder. Assembled per row from `GET /kb/files/{id}` — Perfox offers no endpoint that lists files.',
+    properties: {
+      id: { type: 'string', example: '01a0a375-1eeb-743f-a5a7-f33868768d5f' },
+      name: { type: 'string', example: 'refund-policy.md' },
+      mimeType: { type: 'string', example: 'text/markdown', description: 'Perfox’s `mime_type`.' },
+      sizeBytes: { type: 'integer', example: 9132 },
+      status: {
+        type: 'string',
+        example: 'active',
+        description:
+          'Ingestion state, passed through from Perfox. `active` is indexed and searchable; `error` was stored but never indexed, so it answers nothing. A transient processing state is likely between the two.',
+      },
+      chunkCount: { type: 'integer', description: 'Chunks the file was split into. 0 with `error` means nothing is searchable.' },
+      folderId: { type: 'string' },
+      folderName: { type: 'string', example: 'Root level', description: 'The folder it lives in.' },
+      uploadedAt: { type: 'string', format: 'date-time', description: 'Perfox’s `created_at`.' },
+      updatedAt: { type: 'string', format: 'date-time' },
+    },
+  },
+
   // Request bodies, generated from the Zod schemas the routes actually enforce.
   LoginRequest: bodyOf(loginSchema),
   RegisterRequest: bodyOf(registerSchema),
@@ -328,14 +377,11 @@ const schemas: Record<string, unknown> = {
   UpdateEventRequest: bodyOf(updateEventSchema),
   AddMemberRequest: bodyOf(addMemberSchema),
   UpdateMemberRequest: bodyOf(updateMemberSchema),
-  CreateArticleRequest: bodyOf(createArticleSchema),
-  UpdateArticleRequest: bodyOf(updateArticleSchema),
-  CreateCollectionRequest: bodyOf(createCollectionSchema),
-  BulkDeleteArticlesRequest: bodyOf(bulkDeleteArticlesSchema),
-  CreateAgentRequest: bodyOf(createAgentSchema),
-  UpdateAgentRequest: bodyOf(updateAgentSchema),
-  UpdateAgentStatusRequest: bodyOf(updateAgentStatusSchema),
-  AssignEndpointsRequest: bodyOf(assignEndpointsSchema),
+  SavePlatformConnectionRequest: bodyOf(savePlatformConnectionSchema),
+  SetAgentStatusRequest: bodyOf(setAgentStatusSchema),
+  GenerateCatalogRequest: bodyOf(generateCatalogSchema),
+  CreateFolderRequest: bodyOf(createFolderSchema),
+  UploadMarkdownRequest: bodyOf(uploadMarkdownSchema),
   CreateEndpointRequest: bodyOf(createEndpointSchema),
   UpdateEndpointRequest: bodyOf(updateEndpointSchema),
 };
@@ -638,52 +684,312 @@ const paths: Record<string, unknown> = {
     post: { tags: ['Team'], summary: 'Re-issue an invitation (Admin)', security: bearer, parameters: [pathId()], responses: { 200: okResponse('Re-issued', envelope({ type: 'object' })), ...COMMON_ERRORS } },
   },
 
-  '/knowledge/articles': {
-    get: { tags: ['Knowledge'], summary: 'List articles', security: bearer, parameters: listParams([{ name: 'category', in: 'query', schema: { type: 'string' } }]), responses: { 200: listOf('Article'), ...COMMON_ERRORS } },
-    post: { tags: ['Knowledge'], summary: 'Create an article', description: '`readTime` is derived from the content length.', security: bearer, requestBody: jsonBody(ref('CreateArticleRequest')), responses: { 201: oneOf('Article'), ...COMMON_ERRORS } },
+  '/knowledge/folders': {
+    get: {
+      tags: ['Knowledge Base'],
+      summary: 'List knowledge-base folders',
+      description:
+        'Read live from Perfox on every request, so a folder created there appears without anyone clearing a cache. Used to choose a destination when uploading. Returns 409 until the platform connection is configured.',
+      security: bearer,
+      responses: {
+        200: okResponse(
+          'Folders',
+          envelope({ type: 'object', properties: { folders: { type: 'array', items: ref('KbFolder') } } })
+        ),
+        ...COMMON_ERRORS,
+      },
+    },
+    post: {
+      tags: ['Knowledge Base'],
+      summary: 'Create a folder (Admin, Editor)',
+      description:
+        'Creates the folder in Perfox. Omit `parentId` (or send an empty string) to create at the root.',
+      security: bearer,
+      requestBody: jsonBody(ref('CreateFolderRequest')),
+      responses: {
+        201: okResponse('Created', envelope({ type: 'object', properties: { folder: ref('KbFolder') } })),
+        502: errorResponse('Upstream', 'Perfox did not return the created folder'),
+        ...COMMON_ERRORS,
+      },
+    },
   },
-  '/knowledge/articles/bulk-delete': {
-    post: { tags: ['Knowledge'], summary: 'Delete several articles', security: bearer, requestBody: jsonBody(ref('BulkDeleteArticlesRequest')), responses: { 200: okResponse('Result', envelope({ type: 'object' })), ...COMMON_ERRORS } },
+  '/knowledge/files/upload': {
+    post: {
+      tags: ['Knowledge'],
+      summary: 'Upload a file (Admin, Editor)',
+      description:
+        'Takes the file as a **raw byte stream** with `Content-Type: application/octet-stream`, and rebuilds the multipart request Perfox wants server-side. Done this way so the destination folder is the server\u2019s decision: a browser posting multipart directly would carry its own `folder_id` and could write anywhere in the workspace. It also avoids adding a multipart parser to the service. Limited to 25MB, enforced by the body parser and again in the handler.',
+      security: bearer,
+      parameters: [
+        { name: 'name', in: 'query', required: true, schema: { type: 'string' }, description: 'The file name, including its extension.' },
+        { name: 'mime', in: 'query', schema: { type: 'string' }, description: 'The real media type; defaults to application/octet-stream.' },
+        { name: 'folderId', in: 'query', schema: { type: 'string' }, description: 'Destination folder. Omit for the root.' },
+      ],
+      requestBody: {
+        required: true,
+        content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } },
+      },
+      responses: {
+        201: okResponse('Uploaded', envelope({ type: 'object', properties: { file: ref('KbFile') } })),
+        400: errorResponse('Empty', 'The request carried no file content'),
+        404: errorResponse('Missing folder', 'That folder does not exist in the Perfox knowledge base'),
+        413: errorResponse('Too large', 'Files must be 25MB or smaller'),
+        ...COMMON_ERRORS,
+      },
+    },
   },
-  '/knowledge/articles/{id}': {
-    get: { tags: ['Knowledge'], summary: 'One article', security: bearer, parameters: [pathId()], responses: { 200: oneOf('Article'), 404: errorResponse('Missing', 'Article not found'), ...COMMON_ERRORS } },
-    put: { tags: ['Knowledge'], summary: 'Update an article', security: bearer, parameters: [pathId()], requestBody: jsonBody(ref('UpdateArticleRequest')), responses: { 200: oneOf('Article'), ...COMMON_ERRORS } },
-    delete: { tags: ['Knowledge'], summary: 'Delete an article', security: bearer, parameters: [pathId()], responses: { 200: okResponse('Deleted', envelope({ type: 'object' })), ...COMMON_ERRORS } },
+  '/knowledge/files/{id}': {
+    delete: {
+      tags: ['Knowledge'],
+      summary: 'Delete a knowledge-base file (Admin, Editor)',
+      description:
+        'Removes the file from Perfox, then drops this service\u2019s record of it. Perfox goes first: clearing the local pointer first would hide a file that still exists and still answers queries. Idempotent \u2014 a file already gone upstream returns 200, because the caller\u2019s intent is satisfied either way.',
+      security: bearer,
+      parameters: [pathId()],
+      responses: {
+        200: okResponse(
+          'Deleted',
+          envelope({ type: 'object', properties: { id: { type: 'string' }, deleted: { type: 'boolean' } } })
+        ),
+        ...COMMON_ERRORS,
+      },
+    },
   },
-  '/knowledge/articles/{id}/view': {
-    post: { tags: ['Knowledge'], summary: 'Increment the view counter', security: bearer, parameters: [pathId()], responses: { 200: okResponse('Counted', envelope({ type: 'object' })), ...COMMON_ERRORS } },
+  '/knowledge/catalog': {
+    post: {
+      tags: ['Knowledge'],
+      summary: 'Compile the product catalog into one document (Admin, Editor)',
+      description:
+        'Builds a single `product-catalog.md` from the products and categories held by this service and uploads it. Compiled server-side deliberately: the catalog is already here, a client could only page through part of it, and which fields are omitted is policy rather than formatting. **Price, stock and margin are never included** \u2014 an indexed document is a snapshot, so anything that moves on its own becomes a confident wrong answer; `margin` and `originalPrice` are internal money that should never reach a customer. Set `replaceExisting` to remove the previous copy in that folder first, otherwise re-running stacks duplicates that the agent may answer from at random.',
+      security: bearer,
+      requestBody: jsonBody(ref('GenerateCatalogRequest')),
+      responses: {
+        201: okResponse(
+          'Compiled',
+          envelope({
+            type: 'object',
+            properties: {
+              file: ref('KbFile'),
+              productCount: { type: 'integer' },
+              categoryCount: { type: 'integer' },
+              replaced: { type: 'integer', description: 'Previous copies removed.' },
+              sizeBytes: { type: 'integer' },
+            },
+          })
+        ),
+        400: errorResponse('Nothing selected', 'Select products or categories to generate from'),
+        404: errorResponse('Missing folder', 'That folder does not exist in the Perfox knowledge base'),
+        ...COMMON_ERRORS,
+      },
+    },
   },
-  '/knowledge/collections': {
-    get: { tags: ['Knowledge'], summary: 'List collections', security: bearer, responses: { 200: listOf('Collection'), ...COMMON_ERRORS } },
-    post: { tags: ['Knowledge'], summary: 'Create a collection', security: bearer, requestBody: jsonBody(ref('CreateCollectionRequest')), responses: { 201: oneOf('Collection'), ...COMMON_ERRORS } },
+  '/knowledge/files': {
+    get: {
+      tags: ['Knowledge'],
+      summary: 'List the knowledge-base files',
+      description:
+        'Every file in the knowledge base, newest first, across all folders and the root. Pass `folderId` to narrow it to one folder. Perfox has no endpoint that lists files, so this list is assembled: each folder’s `index.manifest` supplies the ids, `GET /kb/files/{id}` supplies every displayed field, and files this service uploaded are merged in — a manifest is regenerated asynchronously, so a newly uploaded file would otherwise be invisible until indexed. A recorded file Perfox can no longer return is dropped from the list and forgotten.',
+      parameters: [
+        {
+          name: 'folderId',
+          in: 'query',
+          schema: { type: 'string' },
+          description: 'Narrow the list to one folder. Omit for the whole knowledge base.',
+        },
+      ],
+      security: bearer,
+      responses: {
+        200: okResponse(
+          'Files',
+          envelope({
+            type: 'object',
+            properties: {
+              total: { type: 'integer' },
+              folderId: { type: 'string', description: 'Empty unless the list was narrowed to one folder.' },
+              files: { type: 'array', items: ref('KbFile') },
+            },
+          })
+        ),
+        404: errorResponse('Missing folder', 'That folder does not exist in the Perfox knowledge base'),
+        ...COMMON_ERRORS,
+      },
+    },
+    post: {
+      tags: ['Knowledge'],
+      summary: 'Create a markdown file (Admin, Editor)',
+      description:
+        'Takes a file name and markdown content and uploads them as a real `.md` file. `folderId` chooses the destination; omit it for the root of the knowledge base. The browser sends text — the multipart upload Perfox wants is assembled server-side, so the API token never reaches it. `.md` is appended when the name lacks it, and characters that are not safe in a file name are stripped. The file is not searchable the moment this returns: Perfox indexes it asynchronously, and the list reports that as the row’s `status`.',
+      security: bearer,
+      requestBody: jsonBody(ref('UploadMarkdownRequest')),
+      responses: {
+        201: okResponse('Uploaded', envelope({ type: 'object', properties: { file: ref('KbFile') } })),
+        409: errorResponse('No folder', 'No knowledge-base folder is selected — choose one in the Developer hub first'),
+        502: errorResponse('Upstream', 'Perfox did not return the uploaded file'),
+        ...COMMON_ERRORS,
+      },
+    },
   },
   '/knowledge/stats': {
-    get: { tags: ['Knowledge'], summary: 'Article count, total views and active categories', security: bearer, responses: { 200: okResponse('Stats', envelope({ type: 'object' })), ...COMMON_ERRORS } },
-  },
-  '/knowledge/sync': {
-    post: { tags: ['Knowledge'], summary: 'Generate markdown articles from the catalog', description: 'Runs inline; for a large catalog this belongs in a background job.', security: bearer, responses: { 200: okResponse('Generated', envelope({ type: 'object' })), ...COMMON_ERRORS } },
+    get: {
+      tags: ['Knowledge'],
+      summary: 'File counts for the selected folder',
+      description:
+        'Counted from the same rows the list returns, so the tiles and the table cannot disagree. `notIndexed` is the number worth acting on: those files are stored but answer nothing.',
+      parameters: [
+        {
+          name: 'folderId',
+          in: 'query',
+          schema: { type: 'string' },
+          description: 'Narrow the figures to one folder. Omit for the whole knowledge base.',
+        },
+      ],
+      security: bearer,
+      responses: {
+        200: okResponse(
+          'Stats',
+          envelope({
+            type: 'object',
+            properties: {
+              totalFiles: { type: 'integer' },
+              indexedFiles: { type: 'integer' },
+              notIndexed: { type: 'integer' },
+              totalChunks: { type: 'integer' },
+              totalSizeBytes: { type: 'integer' },
+            },
+          })
+        ),
+        409: errorResponse('No folder', 'No knowledge-base folder is selected — choose one in the Developer hub first'),
+        ...COMMON_ERRORS,
+      },
+    },
   },
 
+  '/developer/platform': {
+    get: {
+      tags: ['Developer'],
+      summary: 'Read the Perfox platform connection (Admin)',
+      description:
+        'Reports whether a workspace is connected and how. The API token is never returned — only a masked hint in `apiTokenMasked`. `source` is `stored` when the connection was saved from the Developer Hub, `env` when it comes from PERFOX_API_URL/PERFOX_API_TOKEN, and `none` when nothing is configured. `kbFolder` carries the selected knowledge-base folder as a nested object.',
+      security: bearer,
+      responses: {
+        200: okResponse('Connection state', envelope(ref('PlatformConnection'))),
+        ...COMMON_ERRORS,
+      },
+    },
+    put: {
+      tags: ['Developer'],
+      summary: 'Save and verify the Perfox connection (Admin)',
+      description:
+        'Stores the credentials and immediately calls `GET {apiUrl}/kb/folders` to verify them. A failed verification still saves, with `status: "Error"` and the reason, so nothing the developer typed is lost. Omit `apiToken` to keep the one already saved. The URL is checked against the same SSRF allowlist as webhook endpoints.',
+      security: bearer,
+      requestBody: jsonBody(ref('SavePlatformConnectionRequest')),
+      responses: {
+        200: okResponse(
+          'Saved',
+          envelope({
+            allOf: [
+              ref('PlatformConnection'),
+              {
+                type: 'object',
+                properties: { verification: ref('PlatformVerification') },
+              },
+            ],
+          })
+        ),
+        400: errorResponse('Rejected', 'url must not point at a private or loopback address'),
+        ...COMMON_ERRORS,
+      },
+    },
+    delete: {
+      tags: ['Developer'],
+      summary: 'Disconnect the Perfox platform (Admin)',
+      description:
+        'Deletes the stored token. Agents and webhook endpoints are hidden again but are not themselves deleted. If the deployment also supplies the credentials through the environment, `fellBackToEnvironment` is true and the hub stays connected.',
+      security: bearer,
+      responses: {
+        200: okResponse(
+          'Disconnected',
+          envelope({
+            type: 'object',
+            properties: {
+              disconnected: { type: 'boolean' },
+              fellBackToEnvironment: {
+                type: 'boolean',
+                description: 'True when environment credentials took over, leaving the hub connected.',
+              },
+              connection: ref('PlatformConnection'),
+            },
+          })
+        ),
+        404: errorResponse('Missing', 'No Perfox connection is configured'),
+        ...COMMON_ERRORS,
+      },
+    },
+  },
+  '/developer/platform/test': {
+    post: {
+      tags: ['Developer'],
+      summary: 'Re-verify the stored connection (Admin)',
+      description:
+        'Calls Perfox with the configured credentials and reports the HTTP status, latency and any failure message. Never fails the request because Perfox rejected it — that is the result.',
+      security: bearer,
+      responses: {
+        200: okResponse('Verification result', envelope(ref('PlatformVerification'))),
+        409: errorResponse('Not configured', 'No Perfox connection is configured yet'),
+        ...COMMON_ERRORS,
+      },
+    },
+  },
   '/developer/agents': {
-    get: { tags: ['Developer'], summary: 'List agents (Admin)', description: 'Secrets are masked; only `secretKeyMasked` is returned.', security: bearer, responses: { 200: listOf('Agent'), ...COMMON_ERRORS } },
-    post: { tags: ['Developer'], summary: 'Create an agent (Admin)', description: 'Keys are generated server-side with a CSPRNG. The plaintext secret is returned exactly once, here.', security: bearer, requestBody: jsonBody(ref('CreateAgentRequest')), responses: { 201: oneOf('Agent'), ...COMMON_ERRORS } },
+    get: {
+      tags: ['Developer'],
+      summary: 'List agents (Admin)',
+      description:
+        'Agents cached from the connected Perfox workspace. Served from the local cache; Perfox is called only when the cache is empty or `refresh=true` is passed. Returns 409 until the platform connection is configured.',
+      security: bearer,
+      parameters: [
+        {
+          name: 'refresh',
+          in: 'query',
+          schema: { type: 'boolean' },
+          description: 'Force a re-sync from Perfox instead of serving the cache.',
+        },
+      ],
+      responses: { 200: okResponse('Agents', envelope({ type: 'object' })), ...COMMON_ERRORS },
+    },
   },
   '/developer/agents/{id}': {
-    get: { tags: ['Developer'], summary: 'One agent (Admin)', security: bearer, parameters: [pathId()], responses: { 200: oneOf('Agent'), 404: errorResponse('Missing', 'Agent not found'), ...COMMON_ERRORS } },
-    put: { tags: ['Developer'], summary: 'Update an agent (Admin)', security: bearer, parameters: [pathId()], requestBody: jsonBody(ref('UpdateAgentRequest')), responses: { 200: oneOf('Agent'), ...COMMON_ERRORS } },
-    delete: { tags: ['Developer'], summary: 'Delete an agent (Admin)', security: bearer, parameters: [pathId()], responses: { 200: okResponse('Deleted', envelope({ type: 'object' })), ...COMMON_ERRORS } },
+    get: {
+      tags: ['Developer'],
+      summary: 'One cached agent (Admin)',
+      security: bearer,
+      parameters: [pathId()],
+      responses: {
+        200: oneOf('Agent'),
+        404: errorResponse('Missing', 'Agent not found'),
+        ...COMMON_ERRORS,
+      },
+    },
   },
   '/developer/agents/{id}/status': {
-    patch: { tags: ['Developer'], summary: 'Activate or pause an agent (Admin)', security: bearer, parameters: [pathId()], requestBody: jsonBody(ref('UpdateAgentStatusRequest')), responses: { 200: oneOf('Agent'), ...COMMON_ERRORS } },
-  },
-  '/developer/agents/{id}/endpoints': {
-    patch: { tags: ['Developer'], summary: 'Replace the endpoint assignment (Admin)', security: bearer, parameters: [pathId()], requestBody: jsonBody(ref('AssignEndpointsRequest')), responses: { 200: oneOf('Agent'), 400: errorResponse('Unknown endpoint', 'One or more endpoint ids do not exist'), ...COMMON_ERRORS } },
-  },
-  '/developer/agents/{id}/rotate-key': {
-    post: { tags: ['Developer'], summary: 'Rotate the secret key (Admin)', description: 'Returns the new plaintext secret exactly once.', security: bearer, parameters: [pathId()], responses: { 200: oneOf('Agent'), ...COMMON_ERRORS } },
+    patch: {
+      tags: ['Developer'],
+      summary: 'Publish or pause an agent (Admin)',
+      description:
+        "Forwarded to Perfox: `published` calls POST /agents/{id}/publish, `paused` calls PATCH /agents/{id}. The pause path first reads the agent and echoes its current name, description, channels, nodes and edges back with the new status, so the flow cannot be cleared. A draft agent is refused with 409. The status is read back from Perfox and the cached row re-synced.",
+      security: bearer,
+      parameters: [pathId()],
+      requestBody: jsonBody(ref('SetAgentStatusRequest')),
+      responses: {
+        200: oneOf('Agent'),
+        409: errorResponse('Draft', 'A draft agent cannot be toggled — publish it in Perfox first'),
+        502: errorResponse('Upstream', 'Perfox rejected the configured API token'),
+        ...COMMON_ERRORS,
+      },
+    },
   },
   '/developer/endpoints': {
-    get: { tags: ['Developer'], summary: 'List endpoints (Admin)', security: bearer, responses: { 200: listOf('Endpoint'), ...COMMON_ERRORS } },
+    get: { tags: ['Developer'], summary: 'List endpoints (Admin)', description: 'Returns 409 until the Perfox platform connection is configured.', security: bearer, responses: { 200: listOf('Endpoint'), ...COMMON_ERRORS } },
     post: { tags: ['Developer'], summary: 'Register an endpoint (Admin)', description: 'The URL is checked against an SSRF allowlist: http/https only, and private, loopback or link-local targets are refused.', security: bearer, requestBody: jsonBody(ref('CreateEndpointRequest')), responses: { 201: oneOf('Endpoint'), 400: errorResponse('Unsafe URL', 'url must not point at a private or loopback address'), ...COMMON_ERRORS } },
   },
   '/developer/endpoints/{id}': {
@@ -736,8 +1042,16 @@ export const openApiDocument = {
     { name: 'Conversations', description: 'Multi-channel inbox' },
     { name: 'Schedule', description: 'Appointments, with date-range querying' },
     { name: 'Team', description: 'Members, roles and seats (Admin)' },
-    { name: 'Knowledge', description: 'Articles and collections' },
-    { name: 'Developer', description: 'AI agents and webhook endpoints (Admin)' },
+    {
+      name: 'Knowledge',
+      description:
+        'The files in the selected Perfox knowledge-base folder. Backed by the Perfox workspace, not by local rows, so every route needs the platform connection configured in the Developer hub.',
+    },
+    {
+      name: 'Developer',
+      description:
+        'The Perfox platform connection, the knowledge-base folder it works against, cached agents and webhook endpoints (Admin). Agents and endpoints stay hidden until the connection is configured.',
+    },
   ],
   components: {
     securitySchemes: {

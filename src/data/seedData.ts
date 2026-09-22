@@ -3,8 +3,6 @@ import {
   Category,
   Conversation,
   ScheduleEvent,
-  Article,
-  Collection,
   AIAgent,
   WebhookEndpoint,
   User,
@@ -499,91 +497,7 @@ export const INITIAL_CONVERSATIONS: Conversation[] = [
   }
 ];
 
-export const INITIAL_ARTICLES: Article[] = [
-  {
-    id: "art-1",
-    title: "How to place an order",
-    category: "Orders",
-    categoryColor: "primary",
-    readTime: "4 min read",
-    visibility: "Public article",
-    updated: "10 Sep 2026",
-    icon: "shopping_bag",
-    iconBg: "bg-primary-container/10 text-primary",
-    catBg: "bg-surface-container text-primary",
-    views: "2,420",
-    content: "Learn how customers and agents can initiate bulk commercial orders directly from the Perfox storefront or through the AI assistant widget."
-  },
-  {
-    id: "art-2",
-    title: "Return & Refund Policy",
-    category: "Orders",
-    categoryColor: "primary",
-    readTime: "3 min read",
-    visibility: "Public article",
-    updated: "08 Sep 2026",
-    icon: "assignment_return",
-    iconBg: "bg-primary-container/10 text-primary",
-    catBg: "bg-surface-container text-primary",
-    views: "1,890",
-    content: "Standard 30-day return policies for furniture, electronics, and accessories, including return pickup logistics."
-  },
-  {
-    id: "art-3",
-    title: "Shipping Zones & Delivery Times",
-    category: "Shipping",
-    categoryColor: "secondary",
-    readTime: "5 min read",
-    visibility: "Public article",
-    updated: "02 Sep 2026",
-    icon: "local_shipping",
-    iconBg: "bg-secondary-container/20 text-secondary",
-    catBg: "bg-secondary-container/30 text-on-secondary-container",
-    views: "4,120",
-    content: "Detailed SLAs for metro, tier-2 cities, and international freight forwarding destinations."
-  },
-  {
-    id: "art-4",
-    title: "AI Widget Embedding & Troubleshooting",
-    category: "Developer",
-    categoryColor: "tertiary",
-    readTime: "6 min read",
-    visibility: "Internal & Public",
-    updated: "12 Sep 2026",
-    icon: "integration_instructions",
-    iconBg: "bg-tertiary-fixed/40 text-tertiary",
-    catBg: "bg-tertiary-fixed/30 text-tertiary",
-    views: "980",
-    content: "Guide on embedding the script tag, configuring CORS origins, and setting custom accent colors."
-  }
-];
 
-export const INITIAL_COLLECTIONS: Collection[] = [
-  {
-    id: "col-1",
-    title: "Customer Onboarding & FAQ",
-    description: "General FAQs, order tracking instructions, and warranty terms for customers.",
-    articleCount: 8,
-    icon: "contact_support",
-    color: "primary"
-  },
-  {
-    id: "col-2",
-    title: "Perfox Product Catalogs & Markdown",
-    description: "Auto-synced markdown summaries of furniture, electronics, and store items for LLM knowledge retrieval.",
-    articleCount: 12,
-    icon: "menu_book",
-    color: "secondary"
-  },
-  {
-    id: "col-3",
-    title: "Logistics, Delivery & Installation",
-    description: "Warehouse dispatches, on-site assembly instructions, and transit tracking guides.",
-    articleCount: 4,
-    icon: "local_shipping",
-    color: "tertiary"
-  }
-];
 
 export const INITIAL_SCHEDULE_EVENTS: ScheduleEvent[] = [
   {
@@ -693,76 +607,10 @@ export const INITIAL_SCHEDULE_EVENTS: ScheduleEvent[] = [
   }
 ];
 
-export const INITIAL_DEVELOPER_AGENTS: AIAgent[] = [
-  {
-    id: "agt-001",
-    name: "OmniFlow E-Commerce Sales Bot",
-    workflowId: "wf_flow_ecom_prod_9024a",
-    channel: "Web Storefront Widget",
-    model: "Perfox-Omni 2.5",
-    siteKey: "pk_mock_8f93a0d7e4b94c1a8e99bc1209e5",
-    secretKey: "sk_mock_948f10b299e4431a8bc430e719bf9a",
-    accentColor: "#2563eb",
-    position: "bottom-right",
-    status: "Active",
-    statusColor: "emerald",
-    totalCalls: "128,400",
-    avgLatency: "16 ms",
-    assignedEndpoints: ["ep-1", "ep-2"],
-    description: "Handles live product recommendations, checkout assistance, and inventory queries on the store."
-  },
-  {
-    id: "agt-002",
-    name: "Homestay Concierge & Booking Agent",
-    workflowId: "wf_flow_stay_booking_7812b",
-    channel: "Booking Portal & WhatsApp",
-    model: "Perfox-Omni 2.5 Pro",
-    siteKey: "pk_mock_41b8a902c3ef716298aa129038fc",
-    secretKey: "sk_mock_1820a99cbf781a5298ff302194ea",
-    accentColor: "#7c3aed",
-    position: "bottom-right",
-    status: "Active",
-    statusColor: "emerald",
-    totalCalls: "84,210",
-    avgLatency: "22 ms",
-    assignedEndpoints: ["ep-2", "ep-3"],
-    description: "Automates room availability lookups, reservation scheduling, and guest check-in queries."
-  },
-  {
-    id: "agt-003",
-    name: "Support & Claims Triage Assistant",
-    workflowId: "wf_flow_support_triage_3301c",
-    channel: "Customer Help Desk & Email",
-    model: "Claude 3.7 Sonnet (Hybrid)",
-    siteKey: "pk_mock_7720bc19e8314981a0293810fec1",
-    secretKey: "sk_mock_9921e102837482910fbc2819203a",
-    accentColor: "#059669",
-    position: "bottom-left",
-    status: "Active",
-    statusColor: "emerald",
-    totalCalls: "45,600",
-    avgLatency: "28 ms",
-    assignedEndpoints: ["ep-1", "ep-4"],
-    description: "Resolves customer support tickets, return requests, and warranty claims."
-  },
-  {
-    id: "agt-004",
-    name: "Voice AI Dispatcher & Hotline",
-    workflowId: "wf_flow_voice_call_1094d",
-    channel: "Telephony Voice SIP Trunk",
-    model: "Perfox Realtime Voice v2",
-    siteKey: "pk_mock_1992ef3018294a029cba882190ee",
-    secretKey: "sk_mock_382910fa892102938472910293aa",
-    accentColor: "#d97706",
-    position: "embed-inline",
-    status: "Standby",
-    statusColor: "amber",
-    totalCalls: "12,900",
-    avgLatency: "45 ms",
-    assignedEndpoints: ["ep-1", "ep-3"],
-    description: "Low-latency bidirectional voice stream integration for customer telephone hotline."
-  }
-];
+/* No seeded agents: the agent list is a cache of the connected Perfox
+   workspace, so inventing rows here would put agents in the UI that exist
+   nowhere. */
+export const INITIAL_DEVELOPER_AGENTS: AIAgent[] = [];
 
 export const INITIAL_DEVELOPER_ENDPOINTS: WebhookEndpoint[] = [
   {

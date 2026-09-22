@@ -4,8 +4,6 @@ import { ProductModel } from '../models/Product.model.js';
 import { CategoryModel } from '../models/Category.model.js';
 import { ConversationModel } from '../models/Conversation.model.js';
 import { ScheduleEventModel } from '../models/ScheduleEvent.model.js';
-import { ArticleModel } from '../models/Article.model.js';
-import { CollectionModel } from '../models/Collection.model.js';
 import { AIAgentModel } from '../models/Agent.model.js';
 import { WebhookEndpointModel } from '../models/Endpoint.model.js';
 import {
@@ -14,8 +12,6 @@ import {
   INITIAL_CATEGORIES,
   INITIAL_CONVERSATIONS,
   INITIAL_SCHEDULE_EVENTS,
-  INITIAL_ARTICLES,
-  INITIAL_COLLECTIONS,
   INITIAL_DEVELOPER_AGENTS,
   INITIAL_DEVELOPER_ENDPOINTS,
 } from './seedData.js';
@@ -55,18 +51,6 @@ export const seedDatabase = async (): Promise<void> => {
     if (eventCount === 0) {
       await ScheduleEventModel.insertMany(INITIAL_SCHEDULE_EVENTS);
       console.log(`🌱 [DB Seeder] Inserted ${INITIAL_SCHEDULE_EVENTS.length} default schedule events into MongoDB.`);
-    }
-
-    const articleCount = await ArticleModel.countDocuments();
-    if (articleCount === 0) {
-      await ArticleModel.insertMany(INITIAL_ARTICLES);
-      console.log(`🌱 [DB Seeder] Inserted ${INITIAL_ARTICLES.length} default articles into MongoDB.`);
-    }
-
-    const collectionCount = await CollectionModel.countDocuments();
-    if (collectionCount === 0) {
-      await CollectionModel.insertMany(INITIAL_COLLECTIONS);
-      console.log(`🌱 [DB Seeder] Inserted ${INITIAL_COLLECTIONS.length} default collections into MongoDB.`);
     }
 
     const agentCount = await AIAgentModel.countDocuments();

@@ -5,10 +5,9 @@ import { ProductModel } from '../models/Product.model.js';
 import { CategoryModel } from '../models/Category.model.js';
 import { ConversationModel } from '../models/Conversation.model.js';
 import { ScheduleEventModel } from '../models/ScheduleEvent.model.js';
-import { ArticleModel } from '../models/Article.model.js';
-import { CollectionModel } from '../models/Collection.model.js';
 import { AIAgentModel } from '../models/Agent.model.js';
 import { WebhookEndpointModel } from '../models/Endpoint.model.js';
+import { PlatformConnectionModel } from '../models/PlatformConnection.model.js';
 import {
   User,
   Product,
@@ -16,10 +15,9 @@ import {
   Conversation,
   Message,
   ScheduleEvent,
-  Article,
-  Collection,
   AIAgent,
   WebhookEndpoint,
+  PlatformConnection,
   DashboardMetrics,
 } from '../types/index.js';
 import {
@@ -28,11 +26,12 @@ import {
   INITIAL_CATEGORIES,
   INITIAL_CONVERSATIONS,
   INITIAL_SCHEDULE_EVENTS,
-  INITIAL_ARTICLES,
-  INITIAL_COLLECTIONS,
   INITIAL_DEVELOPER_AGENTS,
   INITIAL_DEVELOPER_ENDPOINTS,
 } from './seedData.js';
+
+/* The platform connection is a singleton, addressed by this fixed key. */
+export const PLATFORM_CONNECTION_ID = 'perfox';
 
 class DataStore {
   // In-memory cache & fallback store
@@ -41,16 +40,16 @@ class DataStore {
   private categories: Category[] = [...INITIAL_CATEGORIES];
   private conversations: Conversation[] = [...INITIAL_CONVERSATIONS];
   private scheduleEvents: ScheduleEvent[] = [...INITIAL_SCHEDULE_EVENTS];
-  private articles: Article[] = [...INITIAL_ARTICLES];
-  private collections: Collection[] = [...INITIAL_COLLECTIONS];
   private agents: AIAgent[] = [...INITIAL_DEVELOPER_AGENTS];
   private endpoints: WebhookEndpoint[] = [...INITIAL_DEVELOPER_ENDPOINTS];
+  /* No seed value: an unconfigured platform connection is the whole point. */
+  private platformConnection: PlatformConnection | null = null;
 
   // ================= USERS =================
   async getUsers(): Promise<User[]> {
     if (isDbConnected()) {
       const docs = await UserModel.find().lean();
-      if (docs && docs.length > 0) return docs as any;
+      return docs as any;
     }
     return this.users;
   }
@@ -58,7 +57,7 @@ class DataStore {
   async getUserById(id: string): Promise<User | undefined> {
     if (isDbConnected()) {
       const doc = await UserModel.findOne({ id }).lean();
-      if (doc) return doc as any;
+      return (doc as any) ?? undefined;
     }
     return this.users.find((u) => u.id === id);
   }
@@ -66,7 +65,7 @@ class DataStore {
   async getUserByEmail(email: string): Promise<User | undefined> {
     if (isDbConnected()) {
       const doc = await UserModel.findOne({ email: email.toLowerCase() }).select('+password').lean();
-      if (doc) return doc as any;
+      return (doc as any) ?? undefined;
     }
     return this.users.find((u) => u.email.toLowerCase() === email.toLowerCase());
   }
@@ -74,15 +73,16 @@ class DataStore {
   async createUser(user: User): Promise<User> {
     if (isDbConnected()) {
       await UserModel.create(user);
+    } else {
+      this.users.push(user);
     }
-    this.users.push(user);
     return user;
   }
 
   async updateUser(id: string, updates: Partial<User>): Promise<User | undefined> {
     if (isDbConnected()) {
       const updated = await UserModel.findOneAndUpdate({ id }, updates, { new: true }).lean();
-      if (updated) return updated as any;
+      return (updated as any) ?? undefined;
     }
     const index = this.users.findIndex((u) => u.id === id);
     if (index === -1) return undefined;
@@ -163,7 +163,7 @@ class DataStore {
   async getProductById(id: string): Promise<Product | undefined> {
     if (isDbConnected()) {
       const doc = await ProductModel.findOne({ id }).lean();
-      if (doc) return doc as any;
+      return (doc as any) ?? undefined;
     }
     return this.products.find((p) => p.id === id);
   }
@@ -171,8 +171,9 @@ class DataStore {
   async createProduct(product: Product): Promise<Product> {
     if (isDbConnected()) {
       await ProductModel.create(product);
+    } else {
+      this.products.unshift(product);
     }
-    this.products.unshift(product);
     /* productsCount is derived from the products collection on read, so there is
        no stored counter to keep in step any more. */
     return product;
@@ -181,7 +182,7 @@ class DataStore {
   async updateProduct(id: string, updates: Partial<Product>): Promise<Product | undefined> {
     if (isDbConnected()) {
       const updated = await ProductModel.findOneAndUpdate({ id }, updates, { new: true }).lean();
-      if (updated) return updated as any;
+      return (updated as any) ?? undefined;
     }
     const index = this.products.findIndex((p) => p.id === id);
     if (index === -1) return undefined;
@@ -271,7 +272,7 @@ class DataStore {
         query.$or = [{ name: regex }, { description: regex }, { id: regex }];
       }
       const docs = await CategoryModel.find(query).sort({ name: 1 }).lean();
-      if (docs && docs.length > 0) return docs as any;
+      return docs as any;
     }
 
     if (!search) return this.categories;
@@ -287,7 +288,7 @@ class DataStore {
   async getCategoryById(id: string): Promise<Category | undefined> {
     if (isDbConnected()) {
       const doc = await CategoryModel.findOne({ id }).lean();
-      if (doc) return doc as any;
+      return (doc as any) ?? undefined;
     }
     return this.categories.find((c) => c.id.toLowerCase() === id.toLowerCase());
   }
@@ -295,15 +296,16 @@ class DataStore {
   async createCategory(category: Category): Promise<Category> {
     if (isDbConnected()) {
       await CategoryModel.create(category);
+    } else {
+      this.categories.unshift(category);
     }
-    this.categories.unshift(category);
     return category;
   }
 
   async updateCategory(id: string, updates: Partial<Category>): Promise<Category | undefined> {
     if (isDbConnected()) {
       const updated = await CategoryModel.findOneAndUpdate({ id }, updates, { new: true }).lean();
-      if (updated) return updated as any;
+      return (updated as any) ?? undefined;
     }
     const index = this.categories.findIndex((c) => c.id.toLowerCase() === id.toLowerCase());
     if (index === -1) return undefined;
@@ -333,7 +335,7 @@ class DataStore {
         query.$or = [{ name: regex }, { lastMessage: regex }];
       }
       const docs = await ConversationModel.find(query).sort({ updatedAt: -1 }).lean();
-      if (docs && docs.length > 0) return docs as any;
+      return docs as any;
     }
 
     let result = [...this.conversations];
@@ -359,9 +361,11 @@ class DataStore {
         },
       }));
       await ConversationModel.bulkWrite(ops);
+      return;
     }
 
-    // Also update in-memory cache
+    /* Offline only — mirroring into the array while Mongo is the source of
+       truth leaves copies that outlive a later delete. */
     convos.forEach((c) => {
       const idx = this.conversations.findIndex((existing) => existing.id === c.id);
       if (idx !== -1) {
@@ -375,7 +379,7 @@ class DataStore {
   async getConversationById(id: string): Promise<Conversation | undefined> {
     if (isDbConnected()) {
       const doc = await ConversationModel.findOne({ id }).lean();
-      if (doc) return doc as any;
+      return (doc as any) ?? undefined;
     }
     return this.conversations.find((c) => c.id === id);
   }
@@ -383,8 +387,9 @@ class DataStore {
   async createConversation(conversation: Conversation): Promise<Conversation> {
     if (isDbConnected()) {
       await ConversationModel.create(conversation);
+    } else {
+      this.conversations.unshift(conversation);
     }
-    this.conversations.unshift(conversation);
     return conversation;
   }
 
@@ -398,7 +403,7 @@ class DataStore {
         },
         { new: true }
       ).lean();
-      if (updated) return updated as any;
+      return (updated as any) ?? undefined;
     }
 
     const index = this.conversations.findIndex((c) => c.id === convoId);
@@ -423,7 +428,7 @@ class DataStore {
         { $set: { unread: 0 } },
         { new: true }
       ).lean();
-      if (updated) return updated as any;
+      return (updated as any) ?? undefined;
     }
 
     const index = this.conversations.findIndex((c) => c.id === convoId);
@@ -458,7 +463,7 @@ class DataStore {
         query.status = filters.status;
       }
       const docs = await ScheduleEventModel.find(query).sort({ dateKey: 1, startTime: 1 }).lean();
-      if (docs && docs.length > 0) return docs as any;
+      return docs as any;
     }
 
     let result = [...this.scheduleEvents];
@@ -483,7 +488,7 @@ class DataStore {
   async getScheduleEventById(id: string): Promise<ScheduleEvent | undefined> {
     if (isDbConnected()) {
       const doc = await ScheduleEventModel.findOne({ id }).lean();
-      if (doc) return doc as any;
+      return (doc as any) ?? undefined;
     }
     return this.scheduleEvents.find((e) => e.id === id);
   }
@@ -491,15 +496,16 @@ class DataStore {
   async createScheduleEvent(event: ScheduleEvent): Promise<ScheduleEvent> {
     if (isDbConnected()) {
       await ScheduleEventModel.create(event);
+    } else {
+      this.scheduleEvents.push(event);
     }
-    this.scheduleEvents.push(event);
     return event;
   }
 
   async updateScheduleEvent(id: string, updates: Partial<ScheduleEvent>): Promise<ScheduleEvent | undefined> {
     if (isDbConnected()) {
       const updated = await ScheduleEventModel.findOneAndUpdate({ id }, updates, { new: true }).lean();
-      if (updated) return updated as any;
+      return (updated as any) ?? undefined;
     }
     const index = this.scheduleEvents.findIndex((e) => e.id === id);
     if (index === -1) return undefined;
@@ -517,103 +523,22 @@ class DataStore {
     return this.scheduleEvents.length < initialLen;
   }
 
-  // ================= KNOWLEDGE BASE =================
-  async getArticles(filters?: { category?: string; search?: string }): Promise<Article[]> {
-    if (isDbConnected()) {
-      const query: any = {};
-      if (filters?.category && filters.category !== 'All') {
-        query.category = { $regex: filters.category, $options: 'i' };
-      }
-      if (filters?.search) {
-        const regex = new RegExp(filters.search, 'i');
-        query.$or = [{ title: regex }, { content: regex }, { category: regex }];
-      }
-      const docs = await ArticleModel.find(query).sort({ updatedAt: -1 }).lean();
-      if (docs && docs.length > 0) return docs as any;
-    }
-
-    let result = [...this.articles];
-    if (filters?.category && filters.category !== 'All') {
-      result = result.filter((a) => a.category.toLowerCase() === filters.category!.toLowerCase());
-    }
-    if (filters?.search) {
-      const q = filters.search.toLowerCase();
-      result = result.filter(
-        (a) =>
-          a.title.toLowerCase().includes(q) ||
-          a.content.toLowerCase().includes(q) ||
-          a.category.toLowerCase().includes(q)
-      );
-    }
-    return result;
-  }
-
-  async getArticleById(id: string): Promise<Article | undefined> {
-    if (isDbConnected()) {
-      const doc = await ArticleModel.findOne({ id }).lean();
-      if (doc) return doc as any;
-    }
-    return this.articles.find((a) => a.id === id);
-  }
-
-  async createArticle(article: Article): Promise<Article> {
-    if (isDbConnected()) {
-      await ArticleModel.create(article);
-    }
-    this.articles.unshift(article);
-    return article;
-  }
-
-  async updateArticle(id: string, updates: Partial<Article>): Promise<Article | undefined> {
-    if (isDbConnected()) {
-      const updated = await ArticleModel.findOneAndUpdate({ id }, updates, { new: true }).lean();
-      if (updated) return updated as any;
-    }
-    const index = this.articles.findIndex((a) => a.id === id);
-    if (index === -1) return undefined;
-    this.articles[index] = { ...this.articles[index], ...updates };
-    return this.articles[index];
-  }
-
-  async deleteArticle(id: string): Promise<boolean> {
-    if (isDbConnected()) {
-      const res = await ArticleModel.deleteOne({ id });
-      return res.deletedCount > 0;
-    }
-    const initialLen = this.articles.length;
-    this.articles = this.articles.filter((a) => a.id !== id);
-    return this.articles.length < initialLen;
-  }
-
-  async getCollections(): Promise<Collection[]> {
-    if (isDbConnected()) {
-      const docs = await CollectionModel.find().sort({ name: 1 }).lean();
-      if (docs && docs.length > 0) return docs as any;
-    }
-    return this.collections;
-  }
-
-  async createCollection(collection: Collection): Promise<Collection> {
-    if (isDbConnected()) {
-      await CollectionModel.create(collection);
-    }
-    this.collections.push(collection);
-    return collection;
-  }
 
   // ================= DEVELOPER & AI AGENTS =================
   async getAgents(): Promise<AIAgent[]> {
     if (isDbConnected()) {
-      const docs = await AIAgentModel.find().sort({ createdAt: -1 }).lean();
-      if (docs && docs.length > 0) return docs as any;
+      /* -_id because .lean() skips the schema's toJSON transform, and Mongo's
+         internal id is not part of this API. */
+      const docs = await AIAgentModel.find().select('-_id').sort({ name: 1 }).lean();
+      return docs as any;
     }
     return this.agents;
   }
 
   async getAgentById(id: string): Promise<AIAgent | undefined> {
     if (isDbConnected()) {
-      const doc = await AIAgentModel.findOne({ id }).lean();
-      if (doc) return doc as any;
+      const doc = await AIAgentModel.findOne({ id }).select('-_id').lean();
+      return (doc as any) ?? undefined;
     }
     return this.agents.find((a) => a.id === id);
   }
@@ -621,15 +546,16 @@ class DataStore {
   async createAgent(agent: AIAgent): Promise<AIAgent> {
     if (isDbConnected()) {
       await AIAgentModel.create(agent);
+    } else {
+      this.agents.push(agent);
     }
-    this.agents.push(agent);
     return agent;
   }
 
   async updateAgent(id: string, updates: Partial<AIAgent>): Promise<AIAgent | undefined> {
     if (isDbConnected()) {
       const updated = await AIAgentModel.findOneAndUpdate({ id }, updates, { new: true }).lean();
-      if (updated) return updated as any;
+      return (updated as any) ?? undefined;
     }
     const index = this.agents.findIndex((a) => a.id === id);
     if (index === -1) return undefined;
@@ -647,10 +573,70 @@ class DataStore {
     return this.agents.length < initialLen;
   }
 
+  /** How many agents are cached — decides whether a read has to call Perfox. */
+  async countAgents(): Promise<number> {
+    if (isDbConnected()) return AIAgentModel.countDocuments();
+    return this.agents.length;
+  }
+
+  /**
+   * Writes a set of agents fetched from Perfox into the cache.
+   *
+   * Perfox-owned fields are overwritten; this platform's configuration
+   * (`siteKey`, `secretKey`, `accentColor`, `position`, `assignedEndpoints`) is
+   * only applied on insert, so a refresh never discards it.
+   *
+   * Agents that no longer exist upstream are dropped, so the cache cannot show
+   * an agent that has been deleted in Perfox.
+   */
+  async syncAgentsFromPerfox(
+    incoming: Partial<AIAgent>[]
+  ): Promise<{ synced: number; removed: number }> {
+    const syncedAt = new Date().toISOString();
+    const ids = incoming.map((a) => a.id!).filter(Boolean);
+
+    if (isDbConnected()) {
+      if (incoming.length) {
+        await AIAgentModel.bulkWrite(
+          incoming.map((agent) => ({
+            updateOne: {
+              filter: { id: agent.id },
+              update: {
+                $set: {
+                  name: agent.name,
+                  status: agent.status,
+                  description: agent.description,
+                  channels: agent.channels ?? [],
+                  activeVersion: agent.activeVersion ?? 0,
+                  nodeCount: agent.nodeCount ?? 0,
+                  perfoxCreatedAt: agent.perfoxCreatedAt ?? '',
+                  perfoxUpdatedAt: agent.perfoxUpdatedAt ?? '',
+                  syncedAt,
+                },
+                $setOnInsert: { id: agent.id },
+              },
+              upsert: true,
+            },
+          }))
+        );
+      }
+
+      const removal = await AIAgentModel.deleteMany({ id: { $nin: ids } });
+      return { synced: incoming.length, removed: removal.deletedCount ?? 0 };
+    }
+
+    const before = this.agents.length;
+    this.agents = incoming.map((agent) => {
+      const existing = this.agents.find((a) => a.id === agent.id);
+      return { ...(existing ?? {}), ...agent, syncedAt } as AIAgent;
+    });
+    return { synced: incoming.length, removed: Math.max(0, before - this.agents.length) };
+  }
+
   async getEndpoints(): Promise<WebhookEndpoint[]> {
     if (isDbConnected()) {
       const docs = await WebhookEndpointModel.find().sort({ createdAt: -1 }).lean();
-      if (docs && docs.length > 0) return docs as any;
+      return docs as any;
     }
     return this.endpoints;
   }
@@ -658,7 +644,7 @@ class DataStore {
   async getEndpointById(id: string): Promise<WebhookEndpoint | undefined> {
     if (isDbConnected()) {
       const doc = await WebhookEndpointModel.findOne({ id }).lean();
-      if (doc) return doc as any;
+      return (doc as any) ?? undefined;
     }
     return this.endpoints.find((e) => e.id === id);
   }
@@ -666,15 +652,16 @@ class DataStore {
   async createEndpoint(endpoint: WebhookEndpoint): Promise<WebhookEndpoint> {
     if (isDbConnected()) {
       await WebhookEndpointModel.create(endpoint);
+    } else {
+      this.endpoints.push(endpoint);
     }
-    this.endpoints.push(endpoint);
     return endpoint;
   }
 
   async updateEndpoint(id: string, updates: Partial<WebhookEndpoint>): Promise<WebhookEndpoint | undefined> {
     if (isDbConnected()) {
       const updated = await WebhookEndpointModel.findOneAndUpdate({ id }, updates, { new: true }).lean();
-      if (updated) return updated as any;
+      return (updated as any) ?? undefined;
     }
     const index = this.endpoints.findIndex((e) => e.id === id);
     if (index === -1) return undefined;
@@ -690,6 +677,70 @@ class DataStore {
     const initialLen = this.endpoints.length;
     this.endpoints = this.endpoints.filter((e) => e.id !== id);
     return this.endpoints.length < initialLen;
+  }
+
+  // ================= PLATFORM CONNECTION =================
+  /**
+   * Reads the singleton Perfox connection.
+   *
+   * `withToken` is off by default: the token is `select:false` on the schema and
+   * almost every caller only wants to know whether a connection exists.
+   */
+  async getPlatformConnection(withToken = false): Promise<PlatformConnection | undefined> {
+    if (isDbConnected()) {
+      const query = PlatformConnectionModel.findOne({ id: PLATFORM_CONNECTION_ID });
+      const doc = await (withToken ? query.select('+apiToken') : query).lean();
+      return (doc as any) ?? undefined;
+    }
+    if (!this.platformConnection) return undefined;
+    return withToken
+      ? this.platformConnection
+      : { ...this.platformConnection, apiToken: '' };
+  }
+
+  /** Creates or replaces the connection — there is only ever one row. */
+  async savePlatformConnection(updates: Partial<PlatformConnection>): Promise<PlatformConnection> {
+    const merged: PlatformConnection = {
+      id: PLATFORM_CONNECTION_ID,
+      apiUrl: '',
+      apiToken: '',
+      status: 'Unverified',
+      ...(this.platformConnection ?? {}),
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (isDbConnected()) {
+      const update: Record<string, unknown> = {
+        $set: { ...updates, id: PLATFORM_CONNECTION_ID, updatedAt: merged.updatedAt },
+      };
+
+      const doc = await PlatformConnectionModel.findOneAndUpdate(
+        { id: PLATFORM_CONNECTION_ID },
+        update,
+        { new: true, upsert: true, setDefaultsOnInsert: true }
+      )
+        .select('+apiToken')
+        .lean();
+      if (doc) {
+        this.platformConnection = doc as any;
+        return doc as any;
+      }
+    }
+
+    this.platformConnection = merged;
+    return merged;
+  }
+
+  async deletePlatformConnection(): Promise<boolean> {
+    let removed = false;
+    if (isDbConnected()) {
+      const res = await PlatformConnectionModel.deleteOne({ id: PLATFORM_CONNECTION_ID });
+      removed = res.deletedCount > 0;
+    }
+    if (this.platformConnection) removed = true;
+    this.platformConnection = null;
+    return removed;
   }
 
   // ================= DASHBOARD METRICS =================
@@ -710,7 +761,10 @@ class DataStore {
     const unreadConversations = conversations.filter((c) => (c.unread || 0) > 0).length;
     const totalAppointments = scheduleEvents.length;
     const upcomingAppointments = scheduleEvents.filter((e) => e.status === 'Confirmed').length;
-    const activeAgents = agents.filter((a) => a.status === 'Active').length;
+    /* Agents carry Perfox's status vocabulary — 'published' is the live state.
+       This counted 'Active', which no agent has had since the cache started
+       mirroring Perfox, so the dashboard read 0 regardless of reality. */
+    const activeAgents = agents.filter((a) => a.status === 'published').length;
 
     return {
       /* The cards also need category and team counts, and a server clock so the

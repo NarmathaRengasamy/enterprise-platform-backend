@@ -1,6 +1,9 @@
 import bcrypt from 'bcryptjs';
+import mongoose from 'mongoose';
 import { isDbConnected } from '../config/db.js';
 import { UserModel } from '../models/User.model.js';
+import { AIAgentModel } from '../models/Agent.model.js';
+import { PlatformConnectionModel } from '../models/PlatformConnection.model.js';
 import { store } from './store.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -84,7 +87,134 @@ export const repairUnusablePasswords = async (): Promise<void> => {
   }
 };
 
+
+/* Fields the agent document used to carry. Some were invented with no source
+   (`totalCalls`, `avgLatency`, `model`), some duplicated Perfox's own data
+   (`workflowId`, `channel`), some were presentation stored in the database
+   (`statusColor`), and the rest were local widget configuration that no longer
+   has anywhere to be set. */
+const RETIRED_AGENT_FIELDS = [
+  'workflowId',
+  'channel',
+  'model',
+  'siteKey',
+  'secretKey',
+  'accentColor',
+  'position',
+  'statusColor',
+  'totalCalls',
+  'avgLatency',
+  'assignedEndpoints',
+  'createdAt',
+  '__v',
+];
+
+/**
+ * Drops the retired fields from agent documents written before the schema was
+ * trimmed. Mongoose ignores unknown fields on read, so they would otherwise sit
+ * in the collection indefinitely.
+ *
+ * Idempotent: once the fields are gone the query matches nothing.
+ */
+export const dropRetiredAgentFields = async (): Promise<void> => {
+  try {
+    if (!isDbConnected()) {
+      log.debug('No database connection — skipping the agent field cleanup');
+      return;
+    }
+
+    const result = await AIAgentModel.collection.updateMany(
+      { $or: RETIRED_AGENT_FIELDS.map((field) => ({ [field]: { $exists: true } })) },
+      { $unset: Object.fromEntries(RETIRED_AGENT_FIELDS.map((field) => [field, ''])) }
+    );
+
+    if (result.modifiedCount) {
+      log.log(`Removed retired fields from ${result.modifiedCount} agent document(s)`);
+    } else {
+      log.debug('No agent documents carry the retired fields');
+    }
+  } catch (error) {
+    log.error(`Agent field cleanup failed: ${(error as Error).message}`);
+  }
+};
+
+/* The flat columns this replaced, in the order they map onto the subdocument. */
+/* Every shape the knowledge-base folder was ever stored in on the platform
+   connection. The folder is now chosen per upload, so none of them belong on
+   this record any more. */
+const RETIRED_PLATFORM_KB_FIELDS = [
+  'kbFolder',
+  'kbFolderId',
+  'kbFolderName',
+  'kbFolderPath',
+  'kbFolderSelectedAt',
+];
+
+/**
+ * Drops the stored knowledge-base folder from the platform connection.
+ *
+ * Files are now uploaded to a folder picked at the time, or to the root, so a
+ * fixed folder on the connection is configuration that nothing reads. Mongoose
+ * ignores unknown fields on read, so it would otherwise sit there indefinitely.
+ *
+ * Idempotent: once the fields are gone the query matches nothing.
+ */
+export const dropPlatformKbFolder = async (): Promise<void> => {
+  try {
+    if (!isDbConnected()) {
+      log.debug('No database connection — skipping the platform folder cleanup');
+      return;
+    }
+
+    const result = await PlatformConnectionModel.collection.updateMany(
+      { $or: RETIRED_PLATFORM_KB_FIELDS.map((field) => ({ [field]: { $exists: true } })) },
+      { $unset: Object.fromEntries(RETIRED_PLATFORM_KB_FIELDS.map((f) => [f, ''])) }
+    );
+
+    if (result.modifiedCount) {
+      log.log(`Removed the stored knowledge-base folder from ${result.modifiedCount} connection(s)`);
+    } else {
+      log.debug('No platform connection stores a knowledge-base folder');
+    }
+  } catch (error) {
+    log.error(`Platform folder cleanup failed: ${(error as Error).message}`);
+  }
+};
+
+/**
+ * Drops the seeded `articles` and `collections` collections.
+ *
+ * The knowledge base is the Perfox workspace; these held demo rows that never
+ * corresponded to anything real there.
+ */
+export const dropMockKnowledgeArticles = async (): Promise<void> => {
+  try {
+    if (!isDbConnected()) {
+      log.debug('No database connection — skipping the mock article cleanup');
+      return;
+    }
+
+    const db = mongoose.connection.db;
+    if (!db) return;
+
+    const present = await db.listCollections().toArray();
+    const names = new Set(present.map((c) => c.name));
+
+    for (const name of ['articles', 'collections']) {
+      if (!names.has(name)) continue;
+      const count = await db.collection(name).countDocuments();
+      await db.collection(name).drop();
+      log.log(`Dropped the mock "${name}" collection (${count} document(s))`);
+    }
+  } catch (error) {
+    log.error(`Mock article cleanup failed: ${(error as Error).message}`);
+  }
+};
+
 export const runMigrations = async (): Promise<void> => {
   await repairUnusablePasswords();
   await backfillCategoryIds();
+  await dropRetiredAgentFields();
+  await dropPlatformKbFolder();
+  await dropMockKnowledgeArticles();
 };

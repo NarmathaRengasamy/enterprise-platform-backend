@@ -165,49 +165,33 @@ export interface ScheduleEvent {
   notes?: string;
 }
 
-export interface Article {
-  id: string;
-  title: string;
-  category: string;
-  categoryColor?: string;
-  readTime: string;
-  visibility: 'Public article' | 'Pinned' | 'Internal & Public' | 'Internal only';
-  updated: string;
-  icon: string;
-  iconBg?: string;
-  catBg?: string;
-  views: string | number;
-  content: string;
-}
 
-export interface Collection {
-  id: string;
-  title: string;
-  description: string;
-  articleCount: number;
-  icon: string;
-  color: string;
-}
 
-export type AgentStatus = 'Active' | 'Standby' | 'Disabled';
+/* Perfox's status vocabulary. Left as a string union of what it sends. */
+export type AgentStatus = 'published' | 'paused' | 'draft' | string;
 
+/**
+ * An agent, cached from the connected Perfox workspace.
+ *
+ * Every field mirrors something Perfox reports. This platform adds no
+ * configuration of its own — the row is a cache, so anything it cannot source
+ * from Perfox has no business being here.
+ */
 export interface AIAgent {
+  /** The Perfox agent id. One identity — no local id shadowing a remote one. */
   id: string;
   name: string;
-  workflowId: string;
-  channel: string;
-  model: string;
-  siteKey: string;
-  secretKey: string;
-  accentColor: string;
-  position: 'bottom-right' | 'bottom-left' | 'embed-inline';
-  status: AgentStatus;
-  statusColor?: string;
-  totalCalls: string | number;
-  avgLatency: string;
-  assignedEndpoints: string[];
   description: string;
-  createdAt?: string;
+  /** Perfox's own vocabulary: published | paused | draft. Stored verbatim. */
+  status: AgentStatus;
+  channels: string[];
+  activeVersion: number;
+  nodeCount: number;
+  /** Timestamps as Perfox reports them. */
+  perfoxCreatedAt: string;
+  perfoxUpdatedAt: string;
+  /** When this row was last refreshed from Perfox. */
+  syncedAt: string;
 }
 
 export type TransportType = 'HTTP' | 'SSE' | 'WebSocket';
@@ -254,4 +238,48 @@ export interface DashboardMetrics {
   activeAgents: number;
   totalApiCalls: string;
   systemHealth: string;
+}
+
+/**
+ * The tenant's connection to the Perfox platform. A singleton — the Developer
+ * Hub cannot expose agents or webhook endpoints until this is set and verified.
+ */
+export interface PlatformConnection {
+  id: string;
+  apiUrl: string;
+  apiToken: string;
+  workspace?: string;
+  status: 'Connected' | 'Unverified' | 'Error';
+  lastVerifiedAt?: string;
+  lastError?: string;
+  connectedBy?: string;
+  updatedAt?: string;
+
+}
+
+/**
+ * A file this service uploaded to a Perfox knowledge-base folder.
+ *
+ * Perfox offers no way to enumerate files, so these rows keep the freshly
+ * uploaded ones visible until the folder manifest catches up. A pointer only —
+ * every displayed attribute is read back from Perfox.
+ */
+export interface KbFileRef {
+  /** Perfox's file id. */
+  fileId: string;
+  folderId: string;
+  name: string;
+  uploadedAt: string;
+  /** Email of whoever uploaded it, when known. */
+  uploadedBy: string;
+}
+
+/** The knowledge-base folder selected against a platform connection. */
+export interface PlatformKbFolder {
+  /** Perfox's folder id; empty string when no folder has been chosen. */
+  id: string;
+  name: string;
+  path: string;
+  /** ISO timestamp of when this folder was selected. */
+  selectedAt: string;
 }
