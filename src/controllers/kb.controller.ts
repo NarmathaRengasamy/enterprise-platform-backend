@@ -17,6 +17,10 @@ interface KbFolder {
   name: string;
   parentId: string | null;
   path: string;
+  /** How deep in the tree, 0 at the root. Drives indentation in a picker. */
+  depth: number;
+  /** Readable ancestry, e.g. 'Company Docs / Nested'. `path` is ids only. */
+  displayPath: string;
   fileCount: number;
   /** Perfox's generated description of the folder's contents, when it has one. */
   summary: string;
@@ -35,17 +39,119 @@ const toFolder = (raw: any): KbFolder => ({
   name: String(raw?.name ?? 'Untitled folder'),
   parentId: raw?.parent_id ?? null,
   path: String(raw?.path ?? ''),
+  /* Filled in by the tree walk, which is the only place ancestry is known. */
+  depth: 0,
+  displayPath: String(raw?.name ?? 'Untitled folder'),
   fileCount: Number(raw?.index?.file_count ?? 0),
   summary: String(raw?.index?.summary ?? ''),
   createdAt: String(raw?.created_at ?? ''),
   updatedAt: String(raw?.updated_at ?? ''),
 });
 
-const fetchFolders = async (): Promise<KbFolder[]> => {
-  const payload = await perfoxFetch<{ data?: any[] }>('/kb/folders');
+const sortNewestFirst = (folders: KbFolder[]): KbFolder[] =>
+  [...folders].sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
+
+/** One level of the tree. `parentId` omitted is the root level, not everything. */
+const fetchFolderLevel = async (parentId?: string): Promise<KbFolder[]> => {
+  const query = parentId ? `?parent_id=${encodeURIComponent(parentId)}` : '';
+  const payload = await perfoxFetch<{ data?: any[] }>(`/kb/folders${query}`);
   const raw = Array.isArray(payload?.data) ? payload.data : [];
-  return raw.map(toFolder);
+
+  /* Newest first, matching the file list: a folder someone just made is the one
+     they are looking for. Perfox returns them in its own order. */
+  return sortNewestFirst(raw.map(toFolder));
 };
+
+/* A tree this deep is already unusable in a picker; the bound is here so a
+   cycle or a pathological structure cannot spin forever. */
+const MAX_FOLDER_DEPTH = 10;
+
+/**
+ * Every folder in the workspace, depth-first, parents before their children.
+ *
+ * `GET /kb/folders` with no parameters returns ONLY the root level — a nested
+ * folder is invisible to it — so the tree is walked one level at a time through
+ * `parent_id`. Each folder carries its `depth` and a readable `displayPath`, so
+ * a picker can indent it without rebuilding the ancestry itself.
+ *
+ * Ids already seen are skipped: a parent cycle would otherwise recurse until
+ * the request died.
+ */
+/*
+ * The walked tree, cached briefly.
+ *
+ * Walking costs one request per folder that has children, and a single page
+ * load asks for the tree three times over (the file list validates its folder,
+ * the stats tile counts every folder, the picker lists them). Uncached that was
+ * ~21 requests for one screen, which tripped Perfox's rate limit — it answers
+ * 429 with `retry-after: 60` and publishes no quota headers, so staying well
+ * under it is the only safe approach.
+ *
+ * 30s: long enough to collapse a page load into one walk, short enough that a
+ * folder created in Perfox still shows up promptly. Every mutation here clears
+ * it outright, so our own changes are never waited for.
+ */
+const TREE_TTL_MS = 30_000;
+let treeCache: { folders: KbFolder[]; at: number } | null = null;
+
+/* One page load fires three requests at once, all of which need the tree. A TTL
+   alone does not help there — they all miss together and each starts its own
+   walk. Sharing the in-flight promise collapses them into a single walk. */
+let treeInFlight: Promise<KbFolder[]> | null = null;
+
+const invalidateFolderTree = (): void => {
+  treeCache = null;
+  statsCache.clear();
+};
+
+const walkFolderTree = async (): Promise<KbFolder[]> => {
+  const collected: KbFolder[] = [];
+  const seen = new Set<string>();
+
+  const walk = async (parent: string | undefined, depth: number, trail: string) => {
+    if (depth > MAX_FOLDER_DEPTH) return;
+
+    const level = await fetchFolderLevel(parent);
+    for (const folder of level) {
+      if (!folder.id || seen.has(folder.id)) continue;
+      seen.add(folder.id);
+
+      folder.depth = depth;
+      folder.displayPath = trail ? `${trail} / ${folder.name}` : folder.name;
+      collected.push(folder);
+
+      await walk(folder.id, depth + 1, folder.displayPath);
+    }
+  };
+
+  await walk(undefined, 0, '');
+  treeCache = { folders: collected, at: Date.now() };
+  return collected;
+};
+
+const fetchFolderTree = async (): Promise<KbFolder[]> => {
+  if (treeCache && Date.now() - treeCache.at < TREE_TTL_MS) return treeCache.folders;
+  if (treeInFlight) return treeInFlight;
+
+  treeInFlight = walkFolderTree().finally(() => {
+    treeInFlight = null;
+  });
+  return treeInFlight;
+};
+
+/**
+ * Folders, from the cached tree.
+ *
+ * `parentId` is answered by filtering the tree rather than asking Perfox for
+ * that level: the tree already holds it, and a second request would buy nothing
+ * but another hit against the rate limit.
+ */
+const fetchFolders = async (parentId?: string): Promise<KbFolder[]> => {
+  const tree = await fetchFolderTree();
+  if (!parentId) return tree;
+  return tree.filter((folder) => folder.parentId === parentId);
+};
+
 
 /**
  * GET /developer/kb/folders
@@ -54,9 +160,12 @@ const fetchFolders = async (): Promise<KbFolder[]> => {
  * without anyone refreshing a cache. The list is small and only read while
  * someone is on the configuration screen.
  */
-export const listFolders = async (_req: Request, res: Response, next: NextFunction) => {
+export const listFolders = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const folders = await fetchFolders();
+    /* Omitted lists every folder; `parentId` lists one level, which is how the
+       browser drills into a folder. */
+    const parentId = String(req.query.parentId ?? '').trim();
+    const folders = await fetchFolders(parentId || undefined);
 
     log.debug(`Listed ${folders.length} knowledge-base folder(s)`);
     return res.status(200).json(ok({ folders }));
@@ -98,6 +207,7 @@ export const createFolder = async (req: Request, res: Response, next: NextFuncti
       throw new AppError('Perfox did not return the created folder', 502);
     }
 
+    invalidateFolderTree();
     log.log(`Created knowledge-base folder "${created.name}" (${created.id})`);
     return res.status(201).json(ok({ folder: created }, `Folder "${created.name}" created`));
   } catch (error) {
@@ -163,84 +273,185 @@ const resolveTargetFolder = async (
   return { id: folder.id, name: folder.name };
 };
 
-const manifestFileIds = async (folderId: string): Promise<string[]> => {
-  const payload = await perfoxFetch<{ data?: any[] }>('/kb/folders');
-  const folder = (Array.isArray(payload?.data) ? payload.data : []).find(
-    (f: any) => String(f?.id) === folderId
-  );
-  const manifest = folder?.index?.manifest;
-  if (!Array.isArray(manifest)) return [];
-  return manifest.map((entry: any) => String(entry?.file_id ?? '')).filter(Boolean);
+export const renameFolderSchema = z.object({
+  body: z.object({
+    /* Trimmed before the length check: '   ' would otherwise pass min(1) and
+       reach Perfox as a blank name. */
+    name: z.string().trim().min(1, 'Folder name is required').max(200),
+  }),
+});
+
+/**
+ * PATCH /knowledge/folders/:id
+ *
+ * Renames the folder in Perfox. Only the display name changes — the id, and so
+ * every file and agent pointing at it, is untouched.
+ */
+export const renameFolder = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const id = String(req.params.id ?? '').trim();
+    const name = String(req.body.name).trim();
+
+    let payload: any;
+    try {
+      payload = await perfoxFetch<any>(`/kb/folders/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+    } catch (error) {
+      /* The upstream 404 names our internal path, which means nothing to the
+         caller — say what is actually missing. */
+      if ((error as AppError)?.statusCode === 404) {
+        throw new AppError('That folder no longer exists in the Perfox knowledge base', 404);
+      }
+      throw error;
+    }
+
+    const folder = toFolder(payload?.data ?? payload);
+    invalidateFolderTree();
+    log.log(`Renamed knowledge-base folder ${id} to "${name}"`);
+    return res.status(200).json(ok({ folder }, `Folder renamed to "${name}"`));
+  } catch (error) {
+    return next(toAppError(error, 'Could not rename the folder', log));
+  }
 };
 
 /**
- * GET /knowledge/files
+ * DELETE /knowledge/folders/:id
  *
- * Perfox cannot list files, so the list is assembled here: the folder manifest
- * gives the ids, `GET /kb/files/{id}` gives each file's metadata, and the rows
- * this service uploaded are merged in so a file created a moment ago is visible
- * before the manifest regenerates.
+ * Perfox refuses to delete a folder that still holds anything, and does NOT
+ * cascade — which is the behaviour we want: a folder delete must never take
+ * documents with it silently. Its 409 carries the counts, so the refusal is
+ * turned into a message that says what to clear out.
+ *
+ * Note the published Perfox spec documents only 200/401/403/404 for this route;
+ * the 409 is real and observed, so it is handled from behaviour, not the spec.
+ */
+export const deleteFolder = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const id = String(req.params.id ?? '').trim();
+
+    let payload: any;
+    try {
+      payload = await perfoxFetch<any>(`/kb/folders/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+    } catch (error) {
+      const detail = (error as any)?.details ?? (error as any)?.body ?? {};
+      const files = Number(detail?.files ?? 0);
+      const subfolders = Number(detail?.subfolders ?? 0);
+
+      if ((error as AppError)?.statusCode === 404) {
+        throw new AppError('That folder no longer exists in the Perfox knowledge base', 404);
+      }
+
+      if (detail?.error === 'folder_not_empty' || files || subfolders) {
+        const parts: string[] = [];
+        if (files) parts.push(`${files} file${files === 1 ? '' : 's'}`);
+        if (subfolders) parts.push(`${subfolders} subfolder${subfolders === 1 ? '' : 's'}`);
+        throw new AppError(
+          `This folder still contains ${parts.join(' and ')}. Delete its contents first — ` +
+            `deleting a folder never removes what is inside it.`,
+          409
+        );
+      }
+      throw error;
+    }
+
+    /* Perfox names the agents that were drawing on this folder, so the caller
+       can say what just lost a source rather than only that it worked. */
+    const body = payload?.data ?? payload;
+    const affectedAgents: string[] = Array.isArray(body?.affected_agents)
+      ? body.affected_agents.map((a: any) => String(a?.name ?? a?.id ?? a))
+      : [];
+
+    invalidateFolderTree();
+    log.log(
+      `Deleted knowledge-base folder ${id}` +
+        (affectedAgents.length ? `, affecting ${affectedAgents.join(', ')}` : '')
+    );
+    return res.status(200).json(ok({ id, deleted: true, affectedAgents }, 'Folder deleted'));
+  } catch (error) {
+    return next(toAppError(error, 'Could not delete the folder', log));
+  }
+};
+
+
+/**
+ * GET /knowledge/files?folderId=&status=&limit=&cursor=
+ *
+ * One level at a time: omitted `folderId` is the root, a folder id is that
+ * folder's contents. This mirrors how the page is browsed — folders, then the
+ * files inside the one that was opened.
+ *
+ * Perfox scopes `GET /kb/files` the same way: with no `folder_id` it answers
+ * with the root only, which is why a bare call returns nothing in a workspace
+ * whose files all live in folders.
+ *
+ * `status`, `limit` and `cursor` are passed straight through.
  *
  * Newest first — someone who has just uploaded a file is looking for it at the
  * top, and it is the row most likely to still be indexing.
  */
-/**
- * GET /knowledge/files?folderId=
- *
- * Lists across the whole knowledge base by default, because files are no longer
- * confined to one configured folder. `folderId` narrows it to a single folder.
- *
- * Perfox has no "list files" endpoint — the only enumeration is each folder's
- * manifest, and a file is absent from that until it has been indexed. Our own
- * upload records fill that window.
- */
 export const listFiles = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const filterId = String(req.query.folderId ?? '').trim();
+    const folderId = String(req.query.folderId ?? '').trim();
+    const status = String(req.query.status ?? '').trim();
+    const limit = String(req.query.limit ?? '').trim();
+    const cursor = String(req.query.cursor ?? '').trim();
 
+    /* Checked before listing so an unknown folder is a 404 rather than an empty
+       list that reads as "this folder is empty". */
     const folders = await fetchFolders();
-    const scope = filterId ? folders.filter((f) => f.id === filterId) : folders;
-    if (filterId && !scope.length) {
+    const folder = folderId ? folders.find((f) => f.id === folderId) : undefined;
+    if (folderId && !folder) {
       throw new AppError('That folder does not exist in the Perfox knowledge base', 404);
     }
 
-    /* fileId -> the folder it belongs to, so each row can name its location. */
-    const owner = new Map<string, string>();
-    for (const folder of scope) {
-      (await manifestFileIds(folder.id)).forEach((id) => owner.set(id, folder.name));
-    }
+    const query = new URLSearchParams();
+    if (folderId) query.set('folder_id', folderId);
+    if (status) query.set('status', status);
+    if (limit) query.set('limit', limit);
+    if (cursor) query.set('cursor', cursor);
+    const suffix = query.toString() ? `?${query}` : '';
 
-    const refQuery = filterId ? { folderId: filterId } : {};
-    const uploaded = await KbFileRefModel.find(refQuery).lean();
-    uploaded.forEach((row: any) => {
-      const id = String(row.fileId);
-      if (owner.has(id)) return;
-      const folder = folders.find((f) => f.id === String(row.folderId));
-      owner.set(id, folder?.name ?? (row.folderId ? 'Unknown folder' : 'Root level'));
-    });
+    const payload = await perfoxFetch<{ data?: any[]; next_cursor?: string }>(
+      `/kb/files${suffix}`
+    );
+    const rows = Array.isArray(payload?.data) ? payload.data : [];
+    const folderName = folder?.name ?? 'Root level';
+    const files: KbFile[] = rows.map((row) => toFile(row, folderName));
 
-    const ids = [...owner.keys()];
+    /* A file uploaded seconds ago can be absent from the listing while Perfox
+       finishes ingesting it. Our own upload records cover that window, so it
+       does not vanish from the page between upload and first index. */
+    const known = new Set(files.map((f) => f.id));
 
-    /* Fetched in parallel: doing this serially would make the page wait on one
-       round trip per row. */
-    const settled = await Promise.allSettled(
-      ids.map((id) => perfoxFetch<any>(`/kb/files/${encodeURIComponent(id)}`))
+    /* First page only. These rows are not part of the cursor's sequence, so
+       merging them into every page would repeat the same file down the list. */
+    const pending = cursor
+      ? []
+      : ((await KbFileRefModel.find(
+          folderId ? { folderId } : { $or: [{ folderId: '' }, { folderId: null }] }
+        ).lean()) as any[]);
+
+    const missing: string[] = [];
+    await Promise.all(
+      pending
+        .filter((row) => !known.has(String(row.fileId)))
+        .map(async (row) => {
+          try {
+            const one = await perfoxFetch<any>(`/kb/files/${encodeURIComponent(row.fileId)}`);
+            files.push(toFile(one?.data ?? one, folderName));
+          } catch {
+            /* Deleted upstream, or never readable — a stale pointer. */
+            missing.push(String(row.fileId));
+          }
+        })
     );
 
-    const files: KbFile[] = [];
-    const missing: string[] = [];
-    settled.forEach((result, index) => {
-      if (result.status === 'fulfilled') {
-        files.push(toFile(result.value?.data ?? result.value, owner.get(ids[index]) ?? ''));
-        return;
-      }
-      /* Deleted upstream, or never readable — drop the row rather than failing
-         the whole list for one bad id. */
-      missing.push(ids[index]);
-    });
-
-    /* A file we recorded that Perfox no longer has is a stale pointer; clearing
-       it stops this retrying a dead id on every page load. */
+    /* Clearing these stops the list retrying a dead id on every page load. */
     if (missing.length) {
       await KbFileRefModel.deleteMany({ fileId: { $in: missing } });
       log.warn(`Dropped ${missing.length} knowledge-base file(s) Perfox could not return`);
@@ -248,8 +459,16 @@ export const listFiles = async (req: Request, res: Response, next: NextFunction)
 
     files.sort((a, b) => (a.uploadedAt < b.uploadedAt ? 1 : a.uploadedAt > b.uploadedAt ? -1 : 0));
 
-    log.debug(`Listed ${files.length} knowledge-base file(s) across ${scope.length} folder(s)`);
-    return res.status(200).json(ok({ total: files.length, folderId: filterId, files }));
+    log.debug(`Listed ${files.length} knowledge-base file(s) in ${folderName}`);
+    return res.status(200).json(
+      ok({
+        total: files.length,
+        folderId,
+        folderName,
+        nextCursor: String(payload?.next_cursor ?? ''),
+        files,
+      })
+    );
   } catch (error) {
     return next(toAppError(error, 'Could not list the knowledge-base files', log));
   }
@@ -325,6 +544,7 @@ export const uploadMarkdown = async (req: Request, res: Response, next: NextFunc
       { upsert: true }
     );
 
+    invalidateFolderTree();
     log.log(`Uploaded "${fileName}" (${file.id}) to ${target.name}`);
     return res.status(201).json(
       ok(
@@ -339,6 +559,15 @@ export const uploadMarkdown = async (req: Request, res: Response, next: NextFunc
   }
 };
 
+/*
+ * Counting the whole knowledge base means one file listing per folder, so the
+ * tiles are cached for the same window as the tree. They are a summary, not a
+ * live readout, and recomputing them on every page load is what makes a rate
+ * limit with no published quota dangerous.
+ */
+const STATS_TTL_MS = 30_000;
+const statsCache = new Map<string, { stats: Record<string, number>; at: number }>();
+
 /**
  * GET /knowledge/stats
  *
@@ -350,28 +579,38 @@ export const getKnowledgeStats = async (req: Request, res: Response, next: NextF
   try {
     const folderId = String(req.query.folderId ?? '').trim();
 
-    const [fromManifest, uploaded] = await Promise.all([
-      manifestFileIds(folderId),
-      KbFileRefModel.find({ folderId }).lean(),
-    ]);
-    const ids = [...new Set([...fromManifest, ...uploaded.map((r: any) => String(r.fileId))])];
+    const cached = statsCache.get(folderId);
+    if (cached && Date.now() - cached.at < STATS_TTL_MS) {
+      return res.status(200).json(ok(cached.stats));
+    }
+
+    /* Scoped to one folder when asked, otherwise the whole knowledge base —
+       root plus every folder, since Perfox scopes a bare list to the root. */
+    const folders = folderId ? [] : await fetchFolders();
+    const scopes = folderId ? [folderId] : ['', ...folders.map((f) => f.id)];
 
     const settled = await Promise.allSettled(
-      ids.map((id) => perfoxFetch<any>(`/kb/files/${encodeURIComponent(id)}`))
+      scopes.map((id) =>
+        perfoxFetch<{ data?: any[] }>(`/kb/files${id ? `?folder_id=${encodeURIComponent(id)}` : ''}`)
+      )
     );
-    const files = settled
-      .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled')
-      .map((r) => toFile(r.value?.data ?? r.value));
 
-    return res.status(200).json(
-      ok({
-        totalFiles: files.length,
-        indexedFiles: files.filter((f) => f.status === 'active').length,
-        notIndexed: files.filter((f) => f.status !== 'active').length,
-        totalChunks: files.reduce((sum, f) => sum + f.chunkCount, 0),
-        totalSizeBytes: files.reduce((sum, f) => sum + f.sizeBytes, 0),
-      })
-    );
+    /* One unreadable folder should not zero the tiles for the rest. */
+    const files = settled
+      .filter((r): r is PromiseFulfilledResult<{ data?: any[] }> => r.status === 'fulfilled')
+      .flatMap((r) => (Array.isArray(r.value?.data) ? r.value.data : []))
+      .map((row) => toFile(row));
+
+    const stats = {
+      totalFiles: files.length,
+      indexedFiles: files.filter((f) => f.status === 'active').length,
+      notIndexed: files.filter((f) => f.status !== 'active').length,
+      totalChunks: files.reduce((sum, f) => sum + f.chunkCount, 0),
+      totalSizeBytes: files.reduce((sum, f) => sum + f.sizeBytes, 0),
+    };
+
+    statsCache.set(folderId, { stats, at: Date.now() });
+    return res.status(200).json(ok(stats));
   } catch (error) {
     return next(toAppError(error, 'Could not compute knowledge statistics', log));
   }
@@ -436,6 +675,7 @@ export const uploadFile = async (req: Request, res: Response, next: NextFunction
       { upsert: true }
     );
 
+    invalidateFolderTree();
     log.log(`Uploaded "${name}" (${body.length} bytes) to ${target.name}`);
     return res.status(201).json(ok({ file }, `"${file.name}" uploaded`));
   } catch (error) {
@@ -468,6 +708,7 @@ export const deleteFile = async (req: Request, res: Response, next: NextFunction
     }
     await KbFileRefModel.deleteOne({ fileId: id });
 
+    invalidateFolderTree();
     log.log(`Deleted knowledge-base file ${id}`);
     return res.status(200).json(ok({ id, deleted: true }, 'File deleted'));
   } catch (error) {
