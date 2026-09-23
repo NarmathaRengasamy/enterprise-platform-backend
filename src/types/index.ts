@@ -98,8 +98,11 @@ export interface MessageAttachment {
   sku?: string;
   status?: string;
   image?: string;
+  /** Signed and short-lived — render it, never store or cache it. */
   fileUrl?: string;
   fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
 }
 
 export interface Message {
@@ -112,7 +115,12 @@ export interface Message {
   timestamp?: string;
   channel?: ChannelType | string;
   toolName?: string;
+  /** Transport outcome only — the business result is in `toolOutput`. */
   toolStatus?: string;
+  toolLatencyMs?: number;
+  toolErrorDetail?: string;
+  toolInput?: Record<string, unknown>;
+  toolOutput?: Record<string, unknown>;
   attachment?: MessageAttachment;
 }
 
