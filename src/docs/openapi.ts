@@ -617,7 +617,7 @@ const paths: Record<string, unknown> = {
       tags: ['Conversations'],
       summary: 'List threads',
       description:
-        'Read live from the connected Perfox workspace and mirrored locally as it goes. Each row is named from the Perfox customer record — `GET /customers` is fetched once and cached, since it returns only the identified customers and takes no pagination. A customer absent from it is an anonymous visitor and is labelled as such rather than resolved individually, which would be a request per row against a rate-limited API; opening the thread resolves the real record by id. If Perfox cannot be reached the mirrored copy is served instead — `source` says which (`perfox` or `local`) and `sourceError` says why, so a stale list is never mistaken for a live one.',
+        'Read from the connected Perfox workspace and mirrored locally as it goes. The list is cached in process for 30 seconds, so it can be up to that old; the thread detail is fetched live on every open. Each row is named from the Perfox customer record — `GET /customers` is fetched once and cached, since it returns only the identified customers and takes no pagination. A customer absent from it is an anonymous visitor and is labelled as such rather than resolved individually, which would be a request per row against a rate-limited API; opening the thread resolves the real record by id. If Perfox cannot be reached the mirrored copy is served instead — `source` says which (`perfox` or `local`) and `sourceError` says why, so the mirror is never mistaken for Perfox data. Note `source` distinguishes the origin, not the freshness: a cached list still reports `perfox`.',
       security: bearer,
       parameters: listParams([
         { name: 'channel', in: 'query', schema: { type: 'string' } },
@@ -637,7 +637,12 @@ const paths: Record<string, unknown> = {
             properties: {
               success: { type: 'boolean' },
               total: { type: 'integer' },
-              source: { type: 'string', enum: ['perfox', 'local'] },
+              source: {
+                type: 'string',
+                enum: ['perfox', 'local'],
+                description:
+                  "Where the data came from — 'perfox' or the local mirror. Not a freshness signal: a list served from the 30-second cache still reports 'perfox'.",
+              },
               agents: {
                 type: 'array',
                 description:
