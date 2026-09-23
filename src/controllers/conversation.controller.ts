@@ -13,6 +13,11 @@ import {
   fetchExternalConversationById,
   fetchExternalConversationEvents,
 } from '../services/perfoxConversation.service.js';
+import {
+  fetchCustomerIndex,
+  fetchCustomerById,
+  displayName,
+} from '../services/perfoxCustomer.service.js';
 
 export const createConversationSchema = z.object({
   body: z.object({
@@ -51,19 +56,24 @@ export const getConversations = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    const { channel, search } = req.query;
+    const { channel, search, agentId } = req.query;
 
     let conversations: Conversation[] = [];
+    /* Reported to the caller: falling back to the local copy without saying so
+       is how a stale list gets mistaken for a live one. */
+    let source: 'perfox' | 'local' = 'perfox';
+    let sourceError = '';
 
     try {
-      // 1. Fetch live conversations from the real Perfox API
       conversations = await fetchExternalConversations();
-      // Sync to local store/MongoDB in background
+      /* Mirrored locally so the list survives Perfox being unreachable. */
       store.upsertConversations(conversations).catch((err) => {
-        console.warn('⚠️ [MongoDB Sync Warning]:', err.message);
+        log.warn(`Could not mirror conversations locally: ${err.message}`);
       });
     } catch (apiErr: any) {
-      console.warn('⚠️ External Perfox API unavailable, using local MongoDB fallback:', apiErr.message);
+      source = 'local';
+      sourceError = apiErr?.message ?? 'Perfox was unreachable';
+      log.warn(`Perfox unavailable, serving the local copy: ${sourceError}`);
       conversations = await store.getConversations();
     }
 
@@ -88,10 +98,92 @@ export const getConversations = async (
       );
     }
 
+    /* The id alone means nothing to a person, so each row is given the agent's
+       name from the cache. Agents deleted in Perfox leave threads behind, so a
+       missing name is expected rather than an error. */
+    const agents = await store.getAgents();
+    const agentNames = new Map(agents.map((a: any) => [a.id, a.name]));
+    /* The channels the agent is integrated with — what the composer may offer.
+       A channel is only a real option if the agent can actually send on it. */
+    const agentChannels = new Map(agents.map((a: any) => [a.id, a.channels ?? []]));
+
+    /* Built BEFORE the agent filter is applied, and counted against the channel
+       and search already in force.
+
+       Deriving them afterwards left the dropdown holding only the agent just
+       selected, so there was no way to switch to a different one without
+       clearing the filter first. Counting them here also means each option
+       reports what it would actually return in the current context, rather than
+       a total that ignores the search box. */
+    const counts = new Map<string, number>();
+    conversations.forEach((c) => {
+      if (!c.workflowId) return;
+      counts.set(c.workflowId, (counts.get(c.workflowId) ?? 0) + 1);
+    });
+
+    const usedAgents = [...counts.entries()]
+      .map(([id, count]) => ({ id, name: agentNames.get(id) ?? '', count }))
+      .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+
+    /* Applied last, so it narrows the rows without narrowing the choices. */
+    if (agentId && agentId !== 'all') {
+      conversations = conversations.filter((c) => c.workflowId === agentId);
+    }
+
+    /* One call for the whole list, cached. `GET /customers` returns only the
+       identified customers — the rest are anonymous visitors, and resolving
+       those one by one would be a request per row against an API that
+       rate-limits well below that. */
+    let customers = new Map<string, any>();
+    try {
+      customers = await fetchCustomerIndex();
+    } catch (err: any) {
+      log.warn(`Could not read the customer index: ${err?.message ?? err}`);
+    }
+
+    const rows = conversations.map((c) => {
+      const customer = c.customerId ? customers.get(c.customerId) : undefined;
+      return {
+        ...c,
+        agentId: c.workflowId ?? '',
+        agentName: c.workflowId ? agentNames.get(c.workflowId) ?? '' : '',
+        agentChannels: c.workflowId ? agentChannels.get(c.workflowId) ?? [] : [],
+        /* Absent from the index means anonymous: `GET /customers` returns
+           everyone who has identified themselves, and six sampled absentees
+           were all tagged `anonymous`. If that ever proves wrong, opening the
+           thread resolves the real record by id and corrects the name. */
+        name: customer
+          ? displayName(customer, c.customerId)
+          : c.customerId
+            ? 'Anonymous visitor'
+            : 'Unknown customer',
+        /* Initials follow the name, or the bubble shows letters from an id. */
+        initials: customer && !customer.anonymous && customer.name
+          ? customer.name
+              .split(' ')
+              .filter(Boolean)
+              .map((w: string) => w[0])
+              .join('')
+              .slice(0, 2)
+              .toUpperCase()
+          : '?',
+        customerName: customer?.name ?? '',
+        customerEmail: customer?.email ?? '',
+        customerPhone: customer?.phone ?? '',
+        customerTags: customer?.tags ?? [],
+        /* Unknown to the index means anonymous, since the index holds everyone
+           who has identified themselves. */
+        customerKnown: Boolean(customer && !customer.anonymous),
+      };
+    });
+
     res.status(200).json({
       success: true,
-      total: conversations.length,
-      data: conversations,
+      total: rows.length,
+      source,
+      sourceError,
+      agents: usedAgents,
+      data: rows,
     });
   } catch (error) {
     next(error);
@@ -169,6 +261,27 @@ export const getConversationById = async (
 
     if (!conversation) {
       throw new AppError('Conversation not found', 404);
+    }
+
+    /* Resolved per id here, not from the index: the thread being opened is one
+       request, and this is the only way to get anything for the anonymous
+       visitors the list endpoint omits. */
+    /* The composer reads this to decide which channels it may offer. */
+    if (conversation.workflowId) {
+      const agent = (await store.getAgents()).find((a: any) => a.id === conversation!.workflowId);
+      (conversation as any).agentName = agent?.name ?? '';
+      (conversation as any).agentChannels = (agent as any)?.channels ?? [];
+    }
+
+    const customer = await fetchCustomerById(conversation.customerId ?? '');
+    if (customer) {
+      conversation = {
+        ...conversation,
+        name: displayName(customer, conversation.customerId),
+        phone: customer.phone || conversation.phone,
+        email: customer.email || conversation.email,
+      };
+      (conversation as any).customer = customer;
     }
 
     res.status(200).json({

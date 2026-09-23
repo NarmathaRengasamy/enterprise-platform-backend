@@ -196,7 +196,21 @@ const schemas: Record<string, unknown> = {
 
   Conversation: {
     type: 'object',
+    description:
+      'A thread from the Perfox workspace, enriched server-side: the customer record supplies `name`/`customerPhone`/`customerEmail`, and the agent supplies `agentName` and `agentChannels` — which is what decides the channels the composer may offer.',
     properties: {
+      agentId: { type: 'string', description: 'The Perfox agent that handled it (its workflowId).' },
+      agentName: { type: 'string' },
+      agentChannels: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Channels the agent is integrated with. A channel absent here cannot be sent on.',
+      },
+      customerName: { type: 'string' },
+      customerEmail: { type: 'string' },
+      customerPhone: { type: 'string' },
+      customerTags: { type: 'array', items: { type: 'string' } },
+      customerKnown: { type: 'boolean', description: 'False for an anonymous visitor.' },
       id: { type: 'string', example: 'convo-1' },
       name: { type: 'string' },
       channel: { type: 'string', enum: ['whatsapp', 'sms', 'email', 'voice', 'web'] },
@@ -599,8 +613,55 @@ const paths: Record<string, unknown> = {
   },
 
   '/conversations': {
-    get: { tags: ['Conversations'], summary: 'List threads', security: bearer, parameters: listParams([{ name: 'channel', in: 'query', schema: { type: 'string' } }]), responses: { 200: listOf('Conversation'), ...COMMON_ERRORS } },
-    post: { tags: ['Conversations'], summary: 'Start a thread', security: bearer, requestBody: jsonBody(ref('CreateConversationRequest')), responses: { 201: oneOf('Conversation'), ...COMMON_ERRORS } },
+    get: {
+      tags: ['Conversations'],
+      summary: 'List threads',
+      description:
+        'Read live from the connected Perfox workspace and mirrored locally as it goes. Each row is named from the Perfox customer record — `GET /customers` is fetched once and cached, since it returns only the identified customers and takes no pagination. A customer absent from it is an anonymous visitor and is labelled as such rather than resolved individually, which would be a request per row against a rate-limited API; opening the thread resolves the real record by id. If Perfox cannot be reached the mirrored copy is served instead — `source` says which (`perfox` or `local`) and `sourceError` says why, so a stale list is never mistaken for a live one.',
+      security: bearer,
+      parameters: listParams([
+        { name: 'channel', in: 'query', schema: { type: 'string' } },
+        {
+          name: 'agentId',
+          in: 'query',
+          schema: { type: 'string' },
+          description:
+            "Narrow to the agent that handled the thread — a conversation's `workflowId` is the Perfox agent id.",
+        },
+      ]),
+      responses: {
+        200: okResponse(
+          'Threads',
+          {
+            type: 'object',
+            properties: {
+              success: { type: 'boolean' },
+              total: { type: 'integer' },
+              source: { type: 'string', enum: ['perfox', 'local'] },
+              agents: {
+                type: 'array',
+                description:
+                  'The agents that handled one of these threads, with a count each. Derived before `agentId` is applied, so selecting one does not remove the others from the list, and counted against the `channel` and `search` in force.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    id: { type: 'string' },
+                    name: { type: 'string', description: 'Empty when the agent was deleted in Perfox.' },
+                    count: { type: 'integer' },
+                  },
+                },
+              },
+              sourceError: { type: 'string', description: "Why the live read failed, when source is 'local'." },
+              data: { type: 'array', items: ref('Conversation') },
+            },
+          }
+        ),
+        ...COMMON_ERRORS,
+      },
+    },
+    post: { tags: ['Conversations'], summary: 'Start a thread',
+      description:
+        'Writes to the local mirror only — this does not create a conversation in Perfox.', security: bearer, requestBody: jsonBody(ref('CreateConversationRequest')), responses: { 201: oneOf('Conversation'), ...COMMON_ERRORS } },
   },
   '/conversations/unread-count': {
     get: { tags: ['Conversations'], summary: 'Unread threads and messages', security: bearer, responses: { 200: okResponse('Counts', envelope({ type: 'object' })), ...COMMON_ERRORS } },
@@ -610,7 +671,7 @@ const paths: Record<string, unknown> = {
   },
   '/conversations/{id}/messages': {
     get: { tags: ['Conversations'], summary: 'Paginate or search within a thread', security: bearer, parameters: [pathId(), ...listParams()], responses: { 200: listOf('Message'), ...COMMON_ERRORS } },
-    post: { tags: ['Conversations'], summary: 'Send a message', description: 'Stores the message. Delivery needs a channel provider, which is not configured.', security: bearer, parameters: [pathId()], requestBody: jsonBody(ref('SendMessageRequest')), responses: { 201: oneOf('Message'), ...COMMON_ERRORS } },
+    post: { tags: ['Conversations'], summary: 'Send a message', description: 'Writes to the local mirror only — the customer does not receive it, because no Perfox send endpoint exists yet. Delivery needs a channel provider, which is not configured.', security: bearer, parameters: [pathId()], requestBody: jsonBody(ref('SendMessageRequest')), responses: { 201: oneOf('Message'), ...COMMON_ERRORS } },
   },
   '/conversations/{id}/read': {
     patch: { tags: ['Conversations'], summary: 'Clear the unread badge', security: bearer, parameters: [pathId()], responses: { 200: oneOf('Conversation'), ...COMMON_ERRORS } },
