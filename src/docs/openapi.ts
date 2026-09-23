@@ -22,6 +22,7 @@ import {
 } from '../controllers/kb.controller.js';
 import { setAgentStatusSchema } from '../controllers/perfox.controller.js';
 import { generateCatalogSchema } from '../controllers/kb.controller.js';
+import { sendOutboundSchema } from '../controllers/conversation.controller.js';
 import { createProductSchema, updateProductSchema } from '../controllers/product.controller.js';
 import { createEventSchema, updateEventSchema } from '../controllers/schedule.controller.js';
 import { addMemberSchema, updateMemberSchema } from '../controllers/team.controller.js';
@@ -204,7 +205,24 @@ const schemas: Record<string, unknown> = {
       agentChannels: {
         type: 'array',
         items: { type: 'string' },
-        description: 'Channels the agent is integrated with. A channel absent here cannot be sent on.',
+        description:
+          'Informational: the channel list as GET /agents reports it. Not the gate — it does not report every trigger.',
+      },
+      agentSenderChannels: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'Informational: the sender nodes wired on the agent canvas. Not the gate.',
+      },
+      agentTriggerChannels: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          "THE GATE for POST /{id}/send. The channels named by the agent's trigger nodes, read from GET /agents/{id} when this conversation is opened (cached 60s) and so present only on the detail response, never on list rows. A channel absent here is shown disabled in the composer and refused with 409 by the server. Webhook triggers are not counted for now.",
+      },
+      agentStatus: {
+        type: 'string',
+        description: 'Only a published agent may send.',
       },
       customerName: { type: 'string' },
       customerEmail: { type: 'string' },
@@ -394,6 +412,7 @@ const schemas: Record<string, unknown> = {
   SavePlatformConnectionRequest: bodyOf(savePlatformConnectionSchema),
   SetAgentStatusRequest: bodyOf(setAgentStatusSchema),
   GenerateCatalogRequest: bodyOf(generateCatalogSchema),
+  SendOutboundRequest: bodyOf(sendOutboundSchema),
   CreateFolderRequest: bodyOf(createFolderSchema),
   UploadMarkdownRequest: bodyOf(uploadMarkdownSchema),
   CreateEndpointRequest: bodyOf(createEndpointSchema),
@@ -677,6 +696,39 @@ const paths: Record<string, unknown> = {
   '/conversations/{id}/messages': {
     get: { tags: ['Conversations'], summary: 'Paginate or search within a thread', security: bearer, parameters: [pathId(), ...listParams()], responses: { 200: listOf('Message'), ...COMMON_ERRORS } },
     post: { tags: ['Conversations'], summary: 'Send a message', description: 'Writes to the local mirror only — the customer does not receive it, because no Perfox send endpoint exists yet. Delivery needs a channel provider, which is not configured.', security: bearer, parameters: [pathId()], requestBody: jsonBody(ref('SendMessageRequest')), responses: { 201: oneOf('Message'), ...COMMON_ERRORS } },
+  },
+  '/conversations/{id}/send': {
+    post: {
+      tags: ['Conversations'],
+      summary: 'Send a message through Perfox (Admin, Editor)',
+      description:
+        "Wraps Perfox's `POST /outbound`. Unlike `POST /{id}/messages`, which only records a message locally, this actually reaches the customer. Refused with 409 unless the agent is **published**, has a trigger for that channel (`agentTriggerChannels`), and the customer holds the matching contact detail. `phone` is excluded: Perfox opens a NEW conversation for a call, so it is not a reply on this thread. **A 200 does not guarantee delivery** — check `sendAuthorized`, which is false when Perfox accepted the request but the agent is not authorized to send on that channel.",
+      security: bearer,
+      parameters: [pathId()],
+      requestBody: jsonBody(ref('SendOutboundRequest')),
+      responses: {
+        200: okResponse(
+          'Accepted by Perfox',
+          envelope({
+            type: 'object',
+            properties: {
+              conversationId: { type: 'string' },
+              executionId: { type: 'string' },
+              status: { type: 'string' },
+              channel: { type: 'string' },
+              sendAuthorized: {
+                type: 'boolean',
+                description: 'False when the agent cannot actually send on this channel.',
+              },
+              to: { type: 'string', description: 'The number or address it was sent to.' },
+            },
+          })
+        ),
+        409: errorResponse('Cannot send', 'ARUVI INDUSTRIES has no sms sender configured'),
+        502: errorResponse('Upstream', 'Perfox rejected the configured API token'),
+        ...COMMON_ERRORS,
+      },
+    },
   },
   '/conversations/{id}/read': {
     patch: { tags: ['Conversations'], summary: 'Clear the unread badge', security: bearer, parameters: [pathId()], responses: { 200: oneOf('Conversation'), ...COMMON_ERRORS } },

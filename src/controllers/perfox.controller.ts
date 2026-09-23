@@ -21,6 +21,9 @@ const toCachedAgent = (raw: any): Partial<AIAgent> => {
     description: agent.description,
     status: agent.status,
     channels: agent.channels,
+    /* Filled in by the sync, which reads the graph; a bare list read cannot
+       know it, and an empty default must not overwrite a known value. */
+    senderChannels: [],
     activeVersion: agent.activeVersion,
     nodeCount: agent.nodeCount,
     perfoxCreatedAt: agent.createdAt,
@@ -29,13 +32,69 @@ const toCachedAgent = (raw: any): Partial<AIAgent> => {
 };
 
 /** Fetches the workspace agents and writes them into the cache. */
+/**
+ * Sender node type -> the channel it can reach out on.
+ *
+ * Perfox reports an agent's `channels` as its TRIGGER channels — how
+ * conversations start. What it can send on lives in the graph as sender nodes,
+ * which only `GET /agents/{id}` returns. An agent triggered by web chat can
+ * still hold a WhatsApp sender, so the two must be read separately.
+ */
+const SENDER_NODE_CHANNELS: Record<string, string> = {
+  whatsapp_sender: 'whatsapp',
+  sms_sender: 'sms',
+  email_sender: 'email',
+  phone_caller: 'phone',
+};
+
+/* Perfox rate-limits (retry_after: 60), and this runs once per agent on a
+   sync. Spacing the reads keeps a 12-agent workspace under the limit. */
+const AGENT_GRAPH_DELAY_MS = 900;
+
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The channels one agent can reach out on, read from its graph.
+ *
+ * A failure here is not fatal: the agent still syncs, it simply reports no
+ * sender until the next refresh. Losing the whole sync because one graph could
+ * not be read would be worse.
+ */
+const readSenderChannels = async (id: string): Promise<string[]> => {
+  try {
+    const payload = await perfoxFetch<any>(`/agents/${encodeURIComponent(id)}`);
+    const nodes = (payload?.data ?? payload)?.nodes;
+    if (!Array.isArray(nodes)) return [];
+
+    const channels = new Set<string>();
+    for (const node of nodes) {
+      const channel = SENDER_NODE_CHANNELS[String(node?.type ?? '')];
+      if (channel) channels.add(channel);
+    }
+    return [...channels];
+  } catch (error) {
+    log.warn(`Could not read the graph for agent ${id}: ${(error as Error).message}`);
+    return [];
+  }
+};
+
 const refreshFromPerfox = async (): Promise<{ synced: number; removed: number }> => {
   const payload = await perfoxFetch<{ data?: any[] }>('/agents');
   const raw = Array.isArray(payload?.data) ? payload.data : [];
-  const result = await store.syncAgentsFromPerfox(raw.map(toCachedAgent));
+  const agents = raw.map(toCachedAgent);
 
+  /* Serial, not parallel: twelve simultaneous reads trip the rate limit, and a
+     sync is not on a request path anyone is waiting behind. */
+  for (let index = 0; index < agents.length; index += 1) {
+    if (index > 0) await pause(AGENT_GRAPH_DELAY_MS);
+    agents[index].senderChannels = await readSenderChannels(agents[index].id!);
+  }
+
+  const result = await store.syncAgentsFromPerfox(agents);
+
+  const sendCapable = agents.filter((a) => (a.senderChannels ?? []).length).length;
   log.log(
-    `Synced ${result.synced} agent(s) from Perfox` +
+    `Synced ${result.synced} agent(s) from Perfox, ${sendCapable} with an outbound sender` +
       (result.removed ? `, removed ${result.removed} no longer in the workspace` : '')
   );
   return result;

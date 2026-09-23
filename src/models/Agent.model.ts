@@ -17,6 +17,8 @@ const AIAgentSchema = new Schema<AIAgent>(
     /* Perfox's own status (published | paused | draft), stored verbatim. */
     status: { type: String, default: 'draft', index: true },
     channels: [{ type: String }],
+    /* Derived from the agent's sender nodes — what it can reach out on. */
+    senderChannels: [{ type: String }],
     activeVersion: { type: Number, default: 0 },
     nodeCount: { type: Number, default: 0 },
     perfoxCreatedAt: { type: String, default: '' },
