@@ -63,6 +63,19 @@ export const perfoxFetch = async <T = any>(
 
   if (!response.ok) {
     log.warn(`Perfox ${path} -> ${response.status} in ${elapsed}ms`);
+
+    /* Read the body before deciding: Perfox explains a refusal in the payload
+       (`{ error: 'folder_not_empty', files, subfolders }`), and discarding it
+       would leave the caller with only a status code to act on. */
+    let detail: any;
+    try {
+      detail = (response.headers.get('content-type') ?? '').includes('json')
+        ? await response.json()
+        : undefined;
+    } catch {
+      detail = undefined;
+    }
+
     if (response.status === 401 || response.status === 403) {
       throw new AppError(
         'Perfox rejected the configured API token. Check it in the platform connection.',
@@ -74,9 +87,24 @@ export const perfoxFetch = async <T = any>(
          unknown id. Passing it through as 404 lets the caller say so, instead of
          a 502 blaming the base URL — which only made sense for the connection
          probe, and that has its own check. */
-      throw new AppError(`Perfox has no ${path}`, 404);
+      throw new AppError(`Perfox has no ${path}`, 404, detail);
     }
-    throw new AppError(`Perfox answered ${response.status} ${response.statusText}`, 502);
+
+    /* A 4xx is about the request, so it is passed through with its own status
+       rather than flattened to 502, which would blame the platform for a
+       refusal the caller can act on. 5xx stays 502: that one really is theirs. */
+    if (response.status < 500) {
+      throw new AppError(
+        String(detail?.message ?? `Perfox answered ${response.status} ${response.statusText}`),
+        response.status,
+        detail
+      );
+    }
+    throw new AppError(
+      `Perfox answered ${response.status} ${response.statusText}`,
+      502,
+      detail
+    );
   }
 
   log.debug(`Perfox ${path} -> ${response.status} in ${elapsed}ms`);

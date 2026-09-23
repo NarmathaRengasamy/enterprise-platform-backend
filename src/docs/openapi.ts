@@ -364,7 +364,9 @@ const schemas: Record<string, unknown> = {
       id: { type: 'string', example: '01a0c813-682c-779f-9df8-23fb62f25368' },
       name: { type: 'string', example: 'folder_CRM' },
       parentId: { type: 'string', nullable: true, description: 'Null at the root.' },
-      path: { type: 'string' },
+      depth: { type: 'integer', description: 'Depth in the tree, 0 at the root. Indent a picker by this.' },
+      displayPath: { type: 'string', description: "Readable ancestry, e.g. 'Company Docs / Nested'. `path` is ids." },
+      path: { type: 'string', description: 'Ancestry as ids, as Perfox reports it.' },
       fileCount: { type: 'integer', description: 'Read from the `index.file_count` Perfox reports.' },
       summary: { type: 'string', description: "Perfox's generated description of the contents, when it has one." },
       createdAt: { type: 'string', format: 'date-time' },
@@ -806,8 +808,16 @@ const paths: Record<string, unknown> = {
     get: {
       tags: ['Knowledge Base'],
       summary: 'List knowledge-base folders',
+      parameters: [
+        {
+          name: 'parentId',
+          in: 'query',
+          schema: { type: 'string' },
+          description: "List just this folder's children. Omit for the whole walked tree, which is what a destination picker wants.",
+        },
+      ],
       description:
-        'Read live from Perfox on every request, so a folder created there appears without anyone clearing a cache. Used to choose a destination when uploading. Returns 409 until the platform connection is configured.',
+        "Every folder in the workspace, depth-first, parents before their children, newest first within each level. IMPORTANT: Perfox's own `GET /kb/folders` returns ONLY the root level, so the tree is walked here one level at a time via `parent_id` — a nested folder is otherwise invisible. Each row carries `depth` and a readable `displayPath` so a picker can indent without rebuilding the ancestry. Pass `parentId` for a single level, which is served by filtering the same walked tree rather than calling Perfox again. The tree is cached for 30s and cleared on any folder or file change, and concurrent callers share one walk — without that, a single page load walked the tree three times over and tripped Perfox's rate limit. Returns 409 until the platform connection is configured.",
       security: bearer,
       responses: {
         200: okResponse(
@@ -827,6 +837,64 @@ const paths: Record<string, unknown> = {
       responses: {
         201: okResponse('Created', envelope({ type: 'object', properties: { folder: ref('KbFolder') } })),
         502: errorResponse('Upstream', 'Perfox did not return the created folder'),
+        ...COMMON_ERRORS,
+      },
+    },
+  },
+  '/knowledge/folders/{id}': {
+    patch: {
+      tags: ['Knowledge Base'],
+      summary: 'Rename a knowledge-base folder',
+      description:
+        'Changes the display name only. The folder id is untouched, so every file in it and every agent pointing at it keeps working.',
+      parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              required: ['name'],
+              properties: { name: { type: 'string', maxLength: 200 } },
+            },
+          },
+        },
+      },
+      security: bearer,
+      responses: {
+        200: okResponse('Renamed', envelope({ type: 'object', properties: { folder: ref('KbFolder') } })),
+        404: errorResponse('Missing folder', 'That folder no longer exists in Perfox'),
+        ...COMMON_ERRORS,
+      },
+    },
+    delete: {
+      tags: ['Knowledge Base'],
+      summary: 'Delete an empty knowledge-base folder',
+      description:
+        'Perfox refuses to delete a folder that still holds files or subfolders, and NEVER cascades — deleting a folder cannot remove documents. That refusal comes back as 409 with a message naming what is still inside. On success, `affectedAgents` lists the agents that were drawing on the folder. Note: the published Perfox spec documents only 200/401/403/404 for this route; the 409 is real and handled from observed behaviour.',
+      parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+      security: bearer,
+      responses: {
+        200: okResponse(
+          'Deleted',
+          envelope({
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              deleted: { type: 'boolean' },
+              affectedAgents: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Agents that were using this folder as a source.',
+              },
+            },
+          })
+        ),
+        404: errorResponse('Missing folder', 'That folder no longer exists in Perfox'),
+        409: errorResponse(
+          'Folder not empty',
+          'This folder still contains 3 files. Delete its contents first — deleting a folder never removes what is inside it.'
+        ),
         ...COMMON_ERRORS,
       },
     },
@@ -906,13 +974,31 @@ const paths: Record<string, unknown> = {
       tags: ['Knowledge'],
       summary: 'List the knowledge-base files',
       description:
-        'Every file in the knowledge base, newest first, across all folders and the root. Pass `folderId` to narrow it to one folder. Perfox has no endpoint that lists files, so this list is assembled: each folder’s `index.manifest` supplies the ids, `GET /kb/files/{id}` supplies every displayed field, and files this service uploaded are merged in — a manifest is regenerated asynchronously, so a newly uploaded file would otherwise be invisible until indexed. A recorded file Perfox can no longer return is dropped from the list and forgotten.',
+        "One level of the knowledge base, newest first. Omit `folderId` for the ROOT level, or pass a folder id for that folder's contents — Perfox scopes `GET /kb/files` the same way, so a bare listing returns only root-level files, not the whole tree. `status`, `limit` and `cursor` pass straight through to Perfox. Files this service uploaded moments ago are merged in, because Perfox can omit a file from the listing while it is still being ingested; a recorded file Perfox can no longer return is dropped and forgotten.",
       parameters: [
         {
           name: 'folderId',
           in: 'query',
           schema: { type: 'string' },
-          description: 'Narrow the list to one folder. Omit for the whole knowledge base.',
+          description: 'The folder to list. Omit for the root level — NOT for the whole tree.',
+        },
+        {
+          name: 'status',
+          in: 'query',
+          schema: { type: 'string' },
+          description: 'Perfox ingestion state, e.g. `active`. Passed through unchanged.',
+        },
+        {
+          name: 'limit',
+          in: 'query',
+          schema: { type: 'integer' },
+          description: 'Page size, passed through to Perfox.',
+        },
+        {
+          name: 'cursor',
+          in: 'query',
+          schema: { type: 'string' },
+          description: 'Opaque page cursor from a previous response nextCursor.',
         },
       ],
       security: bearer,
@@ -923,7 +1009,9 @@ const paths: Record<string, unknown> = {
             type: 'object',
             properties: {
               total: { type: 'integer' },
-              folderId: { type: 'string', description: 'Empty unless the list was narrowed to one folder.' },
+              folderId: { type: 'string', description: 'Empty at the root level.' },
+              folderName: { type: 'string', description: 'The level being listed, e.g. Root level.' },
+              nextCursor: { type: 'string', description: 'Pass back as `cursor` for the next page; empty when there are no more.' },
               files: { type: 'array', items: ref('KbFile') },
             },
           })
@@ -952,13 +1040,13 @@ const paths: Record<string, unknown> = {
       tags: ['Knowledge'],
       summary: 'File counts for the selected folder',
       description:
-        'Counted from the same rows the list returns, so the tiles and the table cannot disagree. `notIndexed` is the number worth acting on: those files are stored but answer nothing.',
+        'Counted from the same rows the list returns, so the tiles and the table cannot disagree. `notIndexed` is the number worth acting on: those files are stored but answer nothing. COST: counting the whole knowledge base means one Perfox file listing per folder, so the result is cached for 30s and cleared whenever a file or folder changes. Treat it as a summary, not a live readout.',
       parameters: [
         {
           name: 'folderId',
           in: 'query',
           schema: { type: 'string' },
-          description: 'Narrow the figures to one folder. Omit for the whole knowledge base.',
+          description: 'Narrow the figures to one folder — far cheaper, since the whole-base figure fans out across every folder. Omit for the whole knowledge base.',
         },
       ],
       security: bearer,
@@ -1142,6 +1230,12 @@ export const openApiDocument = {
       '',
       '**Roles** — `Viewer` reads; `Editor` may write products, categories, schedule, knowledge',
       'and conversations; `Admin` adds Teams and the whole Developer hub.',
+      '',
+      '**Perfox rate limit** — the upstream platform answers `429` with `retry-after: 60`',
+      'and publishes no quota headers, so there is no budget to read. Routes that would',
+      'otherwise fan out are cached server-side and share their in-flight work: the knowledge',
+      'folder tree and its stat tiles for 30s, agents until refreshed, customers for 60s.',
+      'Each affected operation says so in its own description.',
       '',
       '**Envelope** — single `{ success, data }`, list',
       '`{ success, total, page, limit, totalPages, data }`, error `{ success: false, message }`',

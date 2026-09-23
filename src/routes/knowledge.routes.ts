@@ -9,6 +9,9 @@ import {
   listFolders,
   createFolder,
   createFolderSchema,
+  renameFolder,
+  renameFolderSchema,
+  deleteFolder,
   generateCatalog,
   generateCatalogSchema,
 } from '../controllers/kb.controller.js';
@@ -28,6 +31,16 @@ router.get('/stats', getKnowledgeStats);
    belong to the knowledge base rather than to the developer hub. */
 router.get('/folders', listFolders);
 router.post('/folders', requireRoles('Admin', 'Editor'), validateRequest(createFolderSchema), createFolder);
+
+/* Renaming touches only the display name; deleting is refused by Perfox while
+   the folder still holds anything, and never cascades. */
+router.patch(
+  '/folders/:id',
+  requireRoles('Admin', 'Editor'),
+  validateRequest(renameFolderSchema),
+  renameFolder
+);
+router.delete('/folders/:id', requireRoles('Admin', 'Editor'), deleteFolder);
 
 router.get('/files', listFiles);
 router.post(
