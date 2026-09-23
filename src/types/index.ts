@@ -192,7 +192,17 @@ export interface AIAgent {
   description: string;
   /** Perfox's own vocabulary: published | paused | draft. Stored verbatim. */
   status: AgentStatus;
+  /** How conversations START — the agent's trigger channels. */
   channels: string[];
+  /**
+   * How the agent can REACH OUT — derived from the sender nodes wired on its
+   * canvas (`whatsapp_sender`, `email_sender`, `sms_sender`, `phone_caller`).
+   *
+   * Kept separate from `channels` because they answer different questions: an
+   * agent triggered by web chat can still hold a WhatsApp sender, and gating
+   * outbound on `channels` wrongly hid it.
+   */
+  senderChannels: string[];
   activeVersion: number;
   nodeCount: number;
   /** Timestamps as Perfox reports them. */

@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { store } from '../data/store.js';
 import { AppError } from '../middlewares/errorHandler.js';
+import { perfoxFetch } from '../utils/perfox.util.js';
 import { createLogger } from '../utils/logger.js';
 import { toAppError } from '../utils/error.util.js';
 import { getPageParams, ok, paginated } from '../utils/response.util.js';
@@ -13,6 +14,7 @@ import {
   fetchExternalConversationById,
   fetchExternalConversationEvents,
 } from '../services/perfoxConversation.service.js';
+import { fetchAgentTriggerChannels } from '../services/perfoxAgent.service.js';
 import {
   fetchCustomerIndex,
   fetchCustomerById,
@@ -106,6 +108,9 @@ export const getConversations = async (
     /* The channels the agent is integrated with — what the composer may offer.
        A channel is only a real option if the agent can actually send on it. */
     const agentChannels = new Map(agents.map((a: any) => [a.id, a.channels ?? []]));
+    /* What the agent can reach out on — the composer's real gate. */
+    const agentSenders = new Map(agents.map((a: any) => [a.id, a.senderChannels ?? []]));
+    const agentStatuses = new Map(agents.map((a: any) => [a.id, a.status ?? '']));
 
     /* Built BEFORE the agent filter is applied, and counted against the channel
        and search already in force.
@@ -148,6 +153,8 @@ export const getConversations = async (
         agentId: c.workflowId ?? '',
         agentName: c.workflowId ? agentNames.get(c.workflowId) ?? '' : '',
         agentChannels: c.workflowId ? agentChannels.get(c.workflowId) ?? [] : [],
+        agentSenderChannels: c.workflowId ? agentSenders.get(c.workflowId) ?? [] : [],
+        agentStatus: c.workflowId ? agentStatuses.get(c.workflowId) ?? '' : '',
         /* Absent from the index means anonymous: `GET /customers` returns
            everyone who has identified themselves, and six sampled absentees
            were all tagged `anonymous`. If that ever proves wrong, opening the
@@ -271,6 +278,16 @@ export const getConversationById = async (
       const agent = (await store.getAgents()).find((a: any) => a.id === conversation!.workflowId);
       (conversation as any).agentName = agent?.name ?? '';
       (conversation as any).agentChannels = (agent as any)?.channels ?? [];
+      (conversation as any).agentSenderChannels = (agent as any)?.senderChannels ?? [];
+      (conversation as any).agentStatus = (agent as any)?.status ?? '';
+
+      /* What the composer may offer. Read from the agent's own trigger nodes
+         rather than the cached list, which does not report them all. Only on
+         the detail route: doing it per row would be one Perfox call per
+         conversation in the list. */
+      (conversation as any).agentTriggerChannels = await fetchAgentTriggerChannels(
+        conversation.workflowId
+      );
     }
 
     const customer = await fetchCustomerById(conversation.customerId ?? '');
@@ -445,5 +462,126 @@ export const markAsRead = async (
     });
   } catch (error) {
     next(error);
+  }
+};
+
+
+/* Channels a message can go out on. `phone` is excluded deliberately: Perfox
+   opens a NEW conversation for a call, so it is not a reply to this thread and
+   belongs on its own action. */
+const OUTBOUND_CHANNELS = ['whatsapp', 'sms', 'email'] as const;
+
+export const sendOutboundSchema = z.object({
+  body: z.object({
+    channel: z.enum(OUTBOUND_CHANNELS, {
+      errorMap: () => ({ message: `channel must be one of ${OUTBOUND_CHANNELS.join(', ')}` }),
+    }),
+    text: z.string().trim().min(1, 'A message is required'),
+  }),
+});
+
+/**
+ * POST /conversations/:id/send
+ *
+ * Sends a real message through Perfox, rather than writing one locally that
+ * the customer never receives.
+ *
+ * The checks are made here, not only in the UI: the browser decides what to
+ * offer, but what may actually be sent is not the browser's to decide.
+ */
+export const sendOutbound = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { id } = req.params;
+    const channel = String(req.body.channel);
+    const text = String(req.body.text).trim();
+
+    const conversation = await store.getConversationById(id);
+    if (!conversation) throw new AppError('Conversation not found', 404);
+
+    const agentId = conversation.workflowId ?? '';
+    if (!agentId) {
+      throw new AppError('This conversation has no agent, so nothing can send on its behalf', 409);
+    }
+
+    const agent = (await store.getAgents()).find((a: any) => a.id === agentId);
+    if (!agent) {
+      throw new AppError('The agent that handled this conversation is no longer in the workspace', 409);
+    }
+
+    /* Perfox requires a PUBLISHED agent for outbound. Letting a draft through
+       would fail upstream with a less useful message. */
+    if (agent.status !== 'published') {
+      throw new AppError(
+        `${agent.name} is ${agent.status} — only a published agent can send`,
+        409
+      );
+    }
+
+    /* The same check the composer uses, so the UI and the server cannot
+       disagree about what is allowed: the channel must be named by a trigger
+       on the agent's graph. */
+    const triggerChannels = await fetchAgentTriggerChannels(agentId);
+    if (!triggerChannels.includes(channel)) {
+      throw new AppError(
+        `${agent.name} has no ${channel} trigger configured — it is triggered on ${
+          triggerChannels.length ? triggerChannels.join(', ') : 'no channel'
+        }`,
+        409
+      );
+    }
+
+    /* Where to send it. Perfox needs an address, and the customer record is the
+       only place we hold one. */
+    const customer = await fetchCustomerById(conversation.customerId ?? '');
+    const to = channel === 'email' ? customer?.email : customer?.phone;
+    if (!to) {
+      throw new AppError(
+        channel === 'email'
+          ? 'No email address on this customer'
+          : 'No phone number on this customer',
+        409
+      );
+    }
+
+    const result = await perfoxFetch<any>('/outbound', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        agent_id: agentId,
+        channel,
+        to,
+        opening_message: text,
+        ...(conversation.customerId ? { customer_id: conversation.customerId } : {}),
+      }),
+    });
+
+    const payload = result?.data ?? result ?? {};
+    /* A 201 means Perfox accepted the request, not that it went out. The agent
+       can only actually send if the matching sender is wired, which is what
+       send_authorized reports — so it is passed through rather than swallowed. */
+    const sendAuthorized = payload.send_authorized !== false;
+
+    log.log(
+      `Outbound ${channel} on ${id} via ${agent.name} -> ` +
+        `conversation ${payload.conversation_id ?? '?'}, authorized=${sendAuthorized}`
+    );
+
+    return res.status(200).json(
+      ok(
+        {
+          conversationId: payload.conversation_id ?? id,
+          executionId: payload.execution_id ?? '',
+          status: payload.status ?? '',
+          channel: payload.channel ?? channel,
+          sendAuthorized,
+          to,
+        },
+        sendAuthorized
+          ? `Sent via ${channel}`
+          : `Perfox accepted the request but ${agent.name} is not authorized to send on ${channel}`
+      )
+    );
+  } catch (error) {
+    return next(toAppError(error, `Could not send on conversation ${req.params.id}`, log));
   }
 };
