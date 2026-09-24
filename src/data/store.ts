@@ -691,7 +691,12 @@ class DataStore {
   async getPlatformConnection(withToken = false): Promise<PlatformConnection | undefined> {
     if (isDbConnected()) {
       const query = PlatformConnectionModel.findOne({ id: PLATFORM_CONNECTION_ID });
-      const doc = await (withToken ? query.select('+apiToken') : query).lean();
+      /* Both secrets travel together: a caller asking for the credentials wants
+         to USE them, and two separate doors would mean two places to get the
+         `select: false` wrong. */
+      const doc = await (
+        withToken ? query.select('+apiToken +operatorSite.siteSecret') : query
+      ).lean();
       return (doc as any) ?? undefined;
     }
     if (!this.platformConnection) return undefined;

@@ -22,6 +22,7 @@ import scheduleRoutes from './routes/schedule.routes.js';
 import knowledgeRoutes from './routes/knowledge.routes.js';
 import teamRoutes from './routes/team.routes.js';
 import developerRoutes from './routes/developer.routes.js';
+import operatorRoutes from './routes/operator.routes.js';
 
 export const createApp = (): Express => {
   const app = express();
@@ -113,6 +114,7 @@ export const createApp = (): Express => {
   apiRouter.use('/knowledge', knowledgeRoutes);
   apiRouter.use('/team', teamRoutes);
   apiRouter.use('/developer', developerRoutes);
+  apiRouter.use('/operator', operatorRoutes);
 
   app.use('/api/v1', apiRouter);
 

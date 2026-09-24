@@ -22,6 +22,7 @@ import {
 } from '../controllers/kb.controller.js';
 import { setAgentStatusSchema } from '../controllers/perfox.controller.js';
 import { generateCatalogSchema } from '../controllers/kb.controller.js';
+import { saveOperatorSiteSchema } from '../controllers/platform.controller.js';
 import {
   sendOutboundSchema,
   startConversationSchema,
@@ -419,6 +420,7 @@ const schemas: Record<string, unknown> = {
   GenerateCatalogRequest: bodyOf(generateCatalogSchema),
   SendOutboundRequest: bodyOf(sendOutboundSchema),
   StartConversationRequest: bodyOf(startConversationSchema),
+  SaveOperatorSiteRequest: bodyOf(saveOperatorSiteSchema),
   CreateFolderRequest: bodyOf(createFolderSchema),
   UploadMarkdownRequest: bodyOf(uploadMarkdownSchema),
   CreateEndpointRequest: bodyOf(createEndpointSchema),
@@ -759,7 +761,7 @@ const paths: Record<string, unknown> = {
       tags: ['Conversations'],
       summary: 'Start a new conversation (Admin, Editor)',
       description:
-        "Starts a NEW conversation through Perfox's `POST /outbound`, as opposed to `POST /{id}/send`, which replies on an existing thread. The same trigger rule the dropdown uses is enforced here, so a caller that skips the UI cannot start a conversation on a channel the agent has no trigger for. Refused with 409 unless the agent is **published** and has a trigger for that channel, and with 400 when the recipient does not match the channel (an address for `email`, a number otherwise). **A 201 does not guarantee delivery** — check `sendAuthorized`.",
+        "Starts a NEW conversation through Perfox's `POST /outbound`, as opposed to `POST /{id}/send`, which replies on an existing thread. The same trigger rule the dropdown uses is enforced here, so a caller that skips the UI cannot start a conversation on a channel the agent has no trigger for. Refused with 409 unless the agent is **published** and has a trigger for that channel, and with 400 when the recipient does not match the channel (an address for `email`, a number otherwise). **A 201 does not guarantee delivery** — check `sendAuthorized`, which reports the agent's Sender node and therefore applies to the text channels only.\n\n`message` is REQUIRED for `whatsapp`, `sms` and `email` — a message with no message is nothing to send — and OPTIONAL for `phone`, which Perfox also marks optional: a call has nothing to open with. Max 2000 characters, Perfox's own limit.\n\nNOTE on `phone`: this makes the **AI AGENT** place the call. The UI does NOT use it for the Call button — a human operator dials through the `@perfox/operator-react` SDK instead (see `POST /operator/sign`). Both are real capabilities; do not wire one to the other.",
       security: bearer,
       requestBody: jsonBody(ref('StartConversationRequest')),
       responses: {
@@ -1292,6 +1294,54 @@ const paths: Record<string, unknown> = {
     get: { tags: ['Developer'], summary: 'One endpoint (Admin)', security: bearer, parameters: [pathId()], responses: { 200: oneOf('Endpoint'), 404: errorResponse('Missing', 'Endpoint not found'), ...COMMON_ERRORS } },
     put: { tags: ['Developer'], summary: 'Update an endpoint (Admin)', security: bearer, parameters: [pathId()], requestBody: jsonBody(ref('UpdateEndpointRequest')), responses: { 200: oneOf('Endpoint'), ...COMMON_ERRORS } },
     delete: { tags: ['Developer'], summary: 'Delete an endpoint (Admin)', security: bearer, parameters: [pathId()], responses: { 200: okResponse('Deleted', envelope({ type: 'object' })), ...COMMON_ERRORS } },
+  },
+  '/developer/platform/operator': {
+    put: {
+      tags: ['Developer'],
+      summary: 'Save the Perfox operator site (Admin)',
+      description:
+        "The Perfox **Site** a human operator signs in against — distinct from the workspace connection, which is how this service calls Perfox. Stored nested inside the single platform-connection row, so it lives with the tenant it belongs to. `siteSecret` is write-only: stored `select: false`, stripped from every response, and only ever echoed masked. Sending an empty `siteSecret` keeps the stored one, so the host can be corrected without retyping it. `apiHost` is validated: it must be the `-api` host and must not carry a `/api/v1` path — both mistakes surface in the browser as an unexplained CORS error. Returns 409 until the workspace connection exists.",
+      security: bearer,
+      requestBody: jsonBody(ref('SaveOperatorSiteRequest')),
+      responses: {
+        200: okResponse('Saved', envelope({ type: 'object' })),
+        409: errorResponse(
+          'No workspace connection',
+          'Configure the Perfox workspace connection before the operator site'
+        ),
+        ...COMMON_ERRORS,
+      },
+    },
+  },
+  '/operator/sign': {
+    post: {
+      tags: ['Developer'],
+      summary: 'Sign the current user as a Perfox operator',
+      description:
+        "Mints the identity the `@perfox/operator-react` SDK needs to go online, and the only thing standing between a browser and Perfox's operator routes. `userHash = HMAC_SHA256(siteSecret, siteId + '.' + externalId)`; the secret never leaves the server, only the signature. `externalId` is derived from the authenticated session (`op_<userId>`), NEVER from the request body — otherwise any signed-in user could ask us to vouch for somebody else's operator identity. Deliberately mounted outside the Admin-only `/developer` hub: configuring the site is an administrative act, taking a call is not. Returns 409 when no operator site is configured.",
+      security: bearer,
+      responses: {
+        200: okResponse(
+          'Signed',
+          envelope({
+            type: 'object',
+            properties: {
+              apiHost: { type: 'string', example: 'https://acme-api.perfox.ai' },
+              siteId: { type: 'string' },
+              workflowId: { type: 'string', nullable: true },
+              externalId: { type: 'string', example: 'op_6650f1c2a9' },
+              name: { type: 'string' },
+              userHash: { type: 'string', description: 'Hex HMAC proving this server vouched for the operator.' },
+            },
+          })
+        ),
+        409: errorResponse(
+          'No operator site',
+          'The Perfox operator site is not configured — add it in the Developer hub'
+        ),
+        ...COMMON_ERRORS,
+      },
+    },
   },
   '/developer/endpoints/{id}/ping': {
     post: {

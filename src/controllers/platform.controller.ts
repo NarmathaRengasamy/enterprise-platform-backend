@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
+import { createHmac } from 'node:crypto';
 import { store } from '../data/store.js';
 import { config } from '../config/index.js';
 import { AppError } from '../middlewares/errorHandler.js';
@@ -7,7 +8,7 @@ import { createLogger } from '../utils/logger.js';
 import { toAppError } from '../utils/error.util.js';
 import { ok } from '../utils/response.util.js';
 import { assertSafeUrl, mask } from '../utils/outbound.util.js';
-import { PlatformConnection } from '../types/index.js';
+import { PlatformConnection, PlatformOperatorSite } from '../types/index.js';
 
 const log = createLogger('PlatformController');
 
@@ -91,6 +92,7 @@ const present = (connection: (PlatformConnection & { source?: string }) | undefi
       updatedAt: '',
       source: 'none',
       verifyPath: VERIFY_PATH,
+      ...presentOperatorSite(undefined),
     };
   }
   return {
@@ -105,8 +107,27 @@ const present = (connection: (PlatformConnection & { source?: string }) | undefi
     updatedAt: connection.updatedAt || '',
     source: connection.source ?? 'stored',
     verifyPath: VERIFY_PATH,
+    ...presentOperatorSite(connection.operatorSite),
   };
 };
+
+/**
+ * The operator site as the browser may see it — everything except the secret.
+ *
+ * `operatorConfigured` is what the UI gates on: without a site there is nobody
+ * to sign, so the Call button cannot work.
+ */
+const presentOperatorSite = (site?: PlatformOperatorSite) => ({
+  operatorConfigured: Boolean(site?.apiHost && site?.siteId && site?.siteSecret),
+  operatorSite: {
+    apiHost: site?.apiHost ?? '',
+    siteId: site?.siteId ?? '',
+    siteSecretMasked: site?.siteSecret ? mask(site.siteSecret) : '',
+    workflowId: site?.workflowId ?? '',
+    configuredAt: site?.configuredAt ?? '',
+    configuredBy: site?.configuredBy ?? '',
+  },
+});
 
 /**
  * Calls Perfox with the given credentials and reports what came back.
@@ -322,5 +343,133 @@ export const requirePlatformConnection = async (
     );
   } catch (error) {
     return next(toAppError(error, 'Failed to check the platform connection', log));
+  }
+};
+
+/* ------------------------------------------------------- operator site */
+
+/**
+ * The API host the operator SDK talks to.
+ *
+ * Two mistakes are easy here and both surface as an unexplained CORS error in
+ * the browser, so they are refused at the door with a message that says which
+ * value is wanted:
+ *
+ *  - the Studio host (`https://acme.perfox.ai`) instead of the API host
+ *    (`https://acme-api.perfox.ai`), which answers 405 with no CORS headers;
+ *  - our workspace `apiUrl`, which carries a `/api/v1` suffix the SDK adds
+ *    itself.
+ */
+const OPERATOR_HOST_HINT =
+  'Use the API host from Perfox Studio -> Sites, e.g. https://acme-api.perfox.ai — not the Studio host, and without the /api/v1 suffix';
+
+export const saveOperatorSiteSchema = z.object({
+  body: z.object({
+    apiHost: z
+      .string()
+      .trim()
+      .min(1, 'The API host is required')
+      .refine((value) => /^https?:\/\//i.test(value), 'The API host must start with http:// or https://')
+      .refine((value) => !/\/api\/v\d/i.test(value), `The API host must not include a path. ${OPERATOR_HOST_HINT}`)
+      .refine((value) => /-api\./i.test(value), `That looks like the Studio host. ${OPERATOR_HOST_HINT}`),
+    siteId: z.string().trim().min(1, 'The site ID is required'),
+    /* Optional on update: an empty secret means "keep the stored one", so the
+       masked field in the UI does not have to be retyped to change the host. */
+    siteSecret: z.string().trim().optional(),
+    workflowId: z.string().trim().optional(),
+  }),
+});
+
+/**
+ * PUT /developer/platform/operator
+ *
+ * Stores the Perfox Site a human operator signs in against. Nested inside the
+ * platform connection row: it belongs to the same tenant, and keeping it there
+ * means one place to look and one place to clear.
+ */
+export const saveOperatorSite = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const existing = await store.getPlatformConnection(true);
+    if (!existing) {
+      throw new AppError(
+        'Configure the Perfox workspace connection before the operator site',
+        409
+      );
+    }
+
+    const submitted = String(req.body.siteSecret ?? '').trim();
+    const stored = existing.operatorSite?.siteSecret ?? '';
+    const siteSecret = submitted || stored;
+    if (!siteSecret) {
+      throw new AppError('The site secret is required', 400);
+    }
+
+    const operatorSite: PlatformOperatorSite = {
+      apiHost: trimTrailingSlash(String(req.body.apiHost).trim()),
+      siteId: String(req.body.siteId).trim(),
+      siteSecret,
+      workflowId: String(req.body.workflowId ?? '').trim(),
+      configuredAt: new Date().toISOString(),
+      configuredBy: (req as any).user?.email ?? '',
+    };
+
+    const saved = await store.savePlatformConnection({ ...existing, operatorSite });
+
+    log.log(
+      `Operator site saved: ${operatorSite.siteId} on ${operatorSite.apiHost}` +
+        (submitted ? ' (secret replaced)' : ' (secret unchanged)')
+    );
+    return res.status(200).json(ok(present(saved), 'Operator site saved'));
+  } catch (error) {
+    return next(toAppError(error, 'Could not save the operator site', log));
+  }
+};
+
+/**
+ * POST /developer/platform/operator/sign
+ *
+ * Mints the operator identity the SDK needs. The site secret never leaves this
+ * function: it signs, and only the signature goes back.
+ *
+ *   userHash = HMAC_SHA256(siteSecret, `${siteId}.${externalId}`)
+ *
+ * `externalId` is derived from the authenticated session, never from the
+ * request — taking it from the body would let any signed-in user ask us to
+ * vouch for somebody else's operator identity.
+ */
+export const signOperator = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const connection = await store.getPlatformConnection(true);
+    const site = connection?.operatorSite;
+
+    if (!site?.apiHost || !site?.siteId || !site?.siteSecret) {
+      throw new AppError(
+        'The Perfox operator site is not configured — add it in the Developer hub',
+        409
+      );
+    }
+
+    const user = (req as any).user ?? {};
+    const userId = String(user.userId ?? '').trim();
+    if (!userId) throw new AppError('No authenticated user to sign', 401);
+
+    const externalId = `op_${userId}`;
+    const userHash = createHmac('sha256', site.siteSecret)
+      .update(`${site.siteId}.${externalId}`)
+      .digest('hex');
+
+    log.debug(`Signed operator ${externalId} for site ${site.siteId}`);
+    return res.status(200).json(
+      ok({
+        apiHost: site.apiHost,
+        siteId: site.siteId,
+        workflowId: site.workflowId || null,
+        externalId,
+        name: String(user.email ?? externalId),
+        userHash,
+      })
+    );
+  } catch (error) {
+    return next(toAppError(error, 'Could not sign the operator', log));
   }
 };

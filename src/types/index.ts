@@ -280,7 +280,39 @@ export interface PlatformConnection {
   lastError?: string;
   connectedBy?: string;
   updatedAt?: string;
+  /** The operator site, when one has been configured. */
+  operatorSite?: PlatformOperatorSite;
+}
 
+/**
+ * The Perfox **Site** a human operator signs in against — separate from the
+ * workspace API above.
+ *
+ * Read from Perfox Studio -> Sites and entered in the Developer hub rather than
+ * the environment, so it can be changed without a redeploy, like the rest of
+ * this row.
+ */
+export interface PlatformOperatorSite {
+  /**
+   * The API host, e.g. `https://acme-api.perfox.ai`.
+   *
+   * NOT the same value as `apiUrl` above, which carries the `/api/v1` suffix,
+   * and not the Studio host: `https://acme.perfox.ai` answers 405 with no CORS
+   * headers, which the browser reports as an opaque CORS failure.
+   */
+  apiHost: string;
+  siteId: string;
+  /**
+   * The site secret. Never leaves the server: it signs the operator identity
+   * and is stripped from every response, exactly like `apiToken`.
+   *
+   * Anyone holding it can sign as ANY operator on the site.
+   */
+  siteSecret: string;
+  /** Optional — the workflow a call runs through. */
+  workflowId: string;
+  configuredAt: string;
+  configuredBy: string;
 }
 
 /**
