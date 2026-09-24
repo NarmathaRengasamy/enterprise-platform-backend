@@ -139,7 +139,11 @@ class DataStore {
       result = result.filter((p) => p.category?.toLowerCase() === filters.category!.toLowerCase());
     }
     if (filters?.status && filters.status !== 'all' && filters.status !== 'All') {
-      result = result.filter((p) => p.stockStatus.toLowerCase() === filters.status!.toLowerCase());
+      /* A product with no stock figure has no status, so it matches no status
+         filter — rather than throwing on the missing value. */
+      result = result.filter(
+        (p) => (p.stockStatus ?? '').toLowerCase() === filters.status!.toLowerCase()
+      );
     }
     if (filters?.search) {
       const q = filters.search.toLowerCase();

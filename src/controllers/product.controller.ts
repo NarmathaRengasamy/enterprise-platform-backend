@@ -77,7 +77,18 @@ export const updateProductSchema = z.object({
   }),
 });
 
-const deriveStockStatus = (stock: number, reorderPoint = 10): Product['stockStatus'] => {
+/**
+ * Unknown stock is `Unspecified`, not `Out of Stock`.
+ *
+ * Sold out is a claim about the shelf; an empty field is a claim about nobody
+ * having filled it in. Reporting the second as the first is how a product that
+ * simply has not been set up yet ends up hidden from customers.
+ */
+const deriveStockStatus = (
+  stock: number | undefined,
+  reorderPoint = 10
+): Product['stockStatus'] => {
+  if (stock === undefined || stock === null || Number.isNaN(stock)) return 'Unspecified';
   if (stock <= 0) return 'Out of Stock';
   if (stock <= reorderPoint) return 'Low Stock';
   return 'In Stock';
@@ -100,24 +111,17 @@ const resolveCategory = async (categoryId: string) => {
   return category;
 };
 
-/** Mirrors the two rules the Add/Edit form enforces client-side. */
+/**
+ * Variant rules that survive a partly-filled offering.
+ *
+ * Price is deliberately NOT checked. A product can be created before anyone has
+ * decided what it costs; the listing marks it incomplete rather than refusing
+ * the write. Duplicate SKUs are a different matter — they break identity, so
+ * they are still refused.
+ */
 const assertPricing = (body: any): void => {
   const variants = body.variants ?? [];
-
-  if (variants.length === 0) {
-    if (!body.price || body.price <= 0) {
-      throw new AppError('price must be greater than 0 when the offering has no variants', 400);
-    }
-    return;
-  }
-
-  const unpriced = variants.filter((v: any) => !v.price || Number(v.price) <= 0).length;
-  if (unpriced > 0) {
-    throw new AppError(
-      `${unpriced} variant${unpriced === 1 ? '' : 's'} still ${unpriced === 1 ? 'needs' : 'need'} a price`,
-      400
-    );
-  }
+  if (variants.length === 0) return;
 
   const skus = variants.map((v: any) => v.sku).filter(Boolean);
   if (new Set(skus).size !== skus.length) {
@@ -156,6 +160,12 @@ export const getProductStats = async (
     const inStock = products.filter((p) => p.stockStatus === 'In Stock').length;
     const lowStock = products.filter((p) => p.stockStatus === 'Low Stock').length;
     const outOfStock = products.filter((p) => p.stockStatus === 'Out of Stock').length;
+    /* Reported rather than folded into one of the three: a product nobody has
+       given a stock figure is not in stock, not low and not out. Without this
+       the three counts silently fail to sum to the total. */
+    const stockNotSet = products.filter(
+      (p) => !p.stockStatus || p.stockStatus === 'Unspecified'
+    ).length;
 
     res.status(200).json(
       ok({
@@ -163,6 +173,7 @@ export const getProductStats = async (
         inStock,
         lowStock,
         outOfStock,
+        stockNotSet,
         categoriesCount: new Set(products.map((p) => p.categoryId || p.category)).size,
         inStockPercentage: products.length ? Math.round((inStock / products.length) * 100) : 0,
       })
@@ -232,17 +243,32 @@ export const createProduct = async (
     const variants = body.variants ?? [];
 
     /* No base price means the offering prices per variant — the listing still
-       needs a figure, so the cheapest priced variant becomes it. */
+       needs a figure, so the cheapest priced variant becomes it.
+       `Math.min()` of an empty list is Infinity, so the empty case is handled
+       before it is called: with nothing priced there is no figure at all. */
+    const pricedVariants = variants
+      .map((v: any) => Number(v.price))
+      .filter((n: number) => Number.isFinite(n) && n > 0);
     const price =
       body.price && body.price > 0
         ? body.price
-        : Math.min(...variants.map((v: any) => Number(v.price) || 0).filter((n: number) => n > 0));
+        : pricedVariants.length
+          ? Math.min(...pricedVariants)
+          : undefined;
 
+    /* Not defaulted to 0: a stock nobody entered is UNKNOWN, and zero would be
+       read as sold out. Variants still roll up — that sum is a real figure. */
+    /* Only counts variants that actually carry a capacity. Summing with
+       `|| 0` turned a matrix of blanks into a confident 0, which then derived
+       as Out of Stock. */
+    const countedCapacities = variants
+      .map((v: any) => Number(v.capacity ?? v.stock))
+      .filter((n: number) => Number.isFinite(n));
     const stock =
       body.stock ??
-      (variants.length
-        ? variants.reduce((sum: number, v: any) => sum + (Number(v.capacity) || 0), 0)
-        : 0);
+      (countedCapacities.length
+        ? countedCapacities.reduce((sum: number, n: number) => sum + n, 0)
+        : undefined);
 
     const now = new Date().toISOString();
     const newProduct: Product = {

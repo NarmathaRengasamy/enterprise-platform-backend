@@ -41,9 +41,10 @@ export interface ProductGalleryItem {
 export interface ProductVariant {
   option: string;
   value: string;
-  price: number;
-  stock: string;
-  status: 'In Stock' | 'Low Stock' | 'Out of Stock';
+  /** Optional: a variant can exist before it is priced. */
+  price?: number;
+  stock?: string;
+  status?: 'In Stock' | 'Low Stock' | 'Out of Stock' | 'Unspecified';
 }
 
 export interface ProductVideo {
@@ -64,10 +65,19 @@ export interface Product {
   category: string;
   /** @deprecated mirror of categoryId */
   categoryCode: string;
-  price: number;
+  /** Optional: an offering can be created before it is priced. */
+  price?: number;
   originalPrice?: number;
-  stock: number;
-  stockStatus: 'In Stock' | 'Low Stock' | 'Out of Stock';
+  /** Optional and NOT defaulted — absent means unknown, not zero. */
+  stock?: number;
+  /**
+   * `Unspecified` when no stock figure has been entered.
+   *
+   * A distinct value rather than an absent one: "we do not know" is a real
+   * state a person can see, filter by and act on, whereas a missing field is
+   * something every caller has to remember to handle.
+   */
+  stockStatus?: 'In Stock' | 'Low Stock' | 'Out of Stock' | 'Unspecified';
   committed: number;
   reorderPoint: number;
   margin: string;

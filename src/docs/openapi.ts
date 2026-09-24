@@ -168,10 +168,25 @@ const schemas: Record<string, unknown> = {
         description: 'Display name, derived by the server from categoryId. Never accepted from a client.',
       },
       categoryCode: { type: 'string', deprecated: true, description: 'Mirror of categoryId.' },
-      price: { type: 'number', example: 1299 },
+      price: {
+        type: 'number',
+        example: 1299,
+        description:
+          'OPTIONAL. Absent when the offering has not been priced yet — an offering can be created before anyone has decided what it costs. With variants and no base price, this is the cheapest PRICED variant; absent when none of them carry a price.',
+      },
       originalPrice: { type: 'number' },
-      stock: { type: 'integer', example: 142 },
-      stockStatus: { type: 'string', enum: ['In Stock', 'Low Stock', 'Out of Stock'] },
+      stock: {
+        type: 'integer',
+        example: 142,
+        description:
+          'OPTIONAL and never defaulted. Absent means the figure is UNKNOWN, which is not the same as 0 on the shelf. With variants, this is the sum of the variants that actually carry a capacity; absent when none do.',
+      },
+      stockStatus: {
+        type: 'string',
+        enum: ['In Stock', 'Low Stock', 'Out of Stock', 'Unspecified'],
+        description:
+          '`Unspecified` when no stock figure has been entered. A distinct value rather than an absent one, so it can be filtered, counted and displayed like any other. Never report an unknown stock as `Out of Stock` — sold out is a claim about the shelf, an empty field is a claim about the form.',
+      },
       committed: { type: 'integer' },
       reorderPoint: { type: 'integer' },
       margin: { type: 'string', example: '54.2%' },
@@ -503,7 +518,12 @@ const paths: Record<string, unknown> = {
       parameters: listParams([
         { name: 'categoryId', in: 'query', schema: { type: 'string' }, description: 'Preferred: filter by the category id.' },
         { name: 'category', in: 'query', schema: { type: 'string' }, description: 'Legacy: filter by category name.' },
-        { name: 'status', in: 'query', schema: { type: 'string', enum: ['In Stock', 'Low Stock', 'Out of Stock'] } },
+        {
+          name: 'status',
+          in: 'query',
+          schema: { type: 'string', enum: ['In Stock', 'Low Stock', 'Out of Stock', 'Unspecified'] },
+          description: 'Filter by stock status. A product with no stock figure matches only `Unspecified`.',
+        },
       ]),
       responses: { 200: listOf('Product'), ...COMMON_ERRORS },
     },
@@ -511,7 +531,7 @@ const paths: Record<string, unknown> = {
       tags: ['Products'],
       summary: 'Create a product',
       description:
-        'Requires `categoryId`; the server resolves it and derives `category`. `price` is required only when there are no variants — otherwise every variant needs its own price and the base price is the cheapest of them.',
+        'Requires `categoryId`; the server resolves it and derives `category`. **`price` and `stock` are both optional**, on the offering and on every variant: an offering can be created before it has been priced or counted. Do NOT send `0` for a value nobody entered — omit the field. A sent `0` is a real figure and will be treated as free, or as sold out. With variants and no base price, the listing price is the cheapest variant that has one, and the stock is the sum of the variants that carry a capacity; both stay absent when none do. Stock status derives to `Unspecified` when there is no stock figure.',
       security: bearer,
       requestBody: jsonBody(ref('CreateProductRequest')),
       responses: {
@@ -527,7 +547,28 @@ const paths: Record<string, unknown> = {
       tags: ['Products'],
       summary: 'Catalog-wide counters (never page-scoped)',
       security: bearer,
-      responses: { 200: okResponse('Stats', envelope({ type: 'object' })), ...COMMON_ERRORS },
+      responses: {
+        200: okResponse(
+          'Stats',
+          envelope({
+            type: 'object',
+            properties: {
+              total: { type: 'integer' },
+              inStock: { type: 'integer' },
+              lowStock: { type: 'integer' },
+              outOfStock: { type: 'integer' },
+              stockNotSet: {
+                type: 'integer',
+                description:
+                  'Products with no stock figure (stockStatus `Unspecified`). Include it: the four counts sum to `total`, and leaving it out makes the tiles appear not to add up.',
+              },
+              categoriesCount: { type: 'integer' },
+              inStockPercentage: { type: 'integer' },
+            },
+          })
+        ),
+        ...COMMON_ERRORS,
+      },
     },
   },
   '/products/export': {

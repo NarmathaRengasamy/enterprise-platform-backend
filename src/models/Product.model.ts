@@ -5,9 +5,14 @@ const ProductVariantSchema = new Schema(
   {
     option: { type: String, required: true },
     value: { type: String, required: true },
-    price: { type: Number, required: true },
+    /* Optional: a variant can exist before it is priced. */
+    price: { type: Number },
     stock: { type: String, default: '10 units' },
-    status: { type: String, enum: ['In Stock', 'Low Stock', 'Out of Stock'], default: 'In Stock' },
+    status: {
+      type: String,
+      enum: ['In Stock', 'Low Stock', 'Out of Stock', 'Unspecified'],
+      default: 'Unspecified',
+    },
   },
   { _id: false }
 );
@@ -26,10 +31,18 @@ const ProductSchema = new Schema<Product>(
     category: { type: String, required: true, index: true },
     /* Deprecated: kept as a mirror of categoryId for older clients. */
     categoryCode: { type: String, default: 'general' },
-    price: { type: Number, required: true },
+    /* Optional: an offering can be created before it is priced. */
+    price: { type: Number },
     originalPrice: { type: Number },
-    stock: { type: Number, default: 0 },
-    stockStatus: { type: String, enum: ['In Stock', 'Low Stock', 'Out of Stock'], default: 'In Stock' },
+    /* No default: unset stock means UNKNOWN, and 0 reads as sold out. */
+    stock: { type: Number },
+    /* Defaults to Unspecified, not In Stock: with no figure entered the
+       honest label is that nobody has said. */
+    stockStatus: {
+      type: String,
+      enum: ['In Stock', 'Low Stock', 'Out of Stock', 'Unspecified'],
+      default: 'Unspecified',
+    },
     committed: { type: Number, default: 0 },
     reorderPoint: { type: Number, default: 0 },
     margin: { type: String, default: '30%' },
