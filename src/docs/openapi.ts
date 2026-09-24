@@ -22,7 +22,10 @@ import {
 } from '../controllers/kb.controller.js';
 import { setAgentStatusSchema } from '../controllers/perfox.controller.js';
 import { generateCatalogSchema } from '../controllers/kb.controller.js';
-import { sendOutboundSchema } from '../controllers/conversation.controller.js';
+import {
+  sendOutboundSchema,
+  startConversationSchema,
+} from '../controllers/conversation.controller.js';
 import { createProductSchema, updateProductSchema } from '../controllers/product.controller.js';
 import { createEventSchema, updateEventSchema } from '../controllers/schedule.controller.js';
 import { addMemberSchema, updateMemberSchema } from '../controllers/team.controller.js';
@@ -415,6 +418,7 @@ const schemas: Record<string, unknown> = {
   SetAgentStatusRequest: bodyOf(setAgentStatusSchema),
   GenerateCatalogRequest: bodyOf(generateCatalogSchema),
   SendOutboundRequest: bodyOf(sendOutboundSchema),
+  StartConversationRequest: bodyOf(startConversationSchema),
   CreateFolderRequest: bodyOf(createFolderSchema),
   UploadMarkdownRequest: bodyOf(uploadMarkdownSchema),
   CreateEndpointRequest: bodyOf(createEndpointSchema),
@@ -698,6 +702,92 @@ const paths: Record<string, unknown> = {
   '/conversations/{id}/messages': {
     get: { tags: ['Conversations'], summary: 'Paginate or search within a thread', security: bearer, parameters: [pathId(), ...listParams()], responses: { 200: listOf('Message'), ...COMMON_ERRORS } },
     post: { tags: ['Conversations'], summary: 'Send a message', description: 'Writes to the local mirror only — the customer does not receive it, because no Perfox send endpoint exists yet. Delivery needs a channel provider, which is not configured.', security: bearer, parameters: [pathId()], requestBody: jsonBody(ref('SendMessageRequest')), responses: { 201: oneOf('Message'), ...COMMON_ERRORS } },
+  },
+  '/conversations/outbound/options': {
+    get: {
+      tags: ['Conversations'],
+      summary: 'Channels and agents for starting a conversation',
+      description:
+        "Fills the two dependent dropdowns on the new-conversation dialog: a channel, and the agents that can be reached on it. An agent qualifies by having a TRIGGER for that channel — not by Perfox's `channels` field, which does not report every trigger. Served entirely from the agent cache (`triggerChannels`, stored during the sync), so it costs ZERO Perfox calls; reading each agent graph on demand would be one request per agent, which is the fan-out that trips the rate limit. Every channel is returned even when no agent triggers on it, so the UI can disable rather than hide it. `web` is excluded: a web-chat conversation starts when a visitor opens the widget.",
+      security: bearer,
+      responses: {
+        200: okResponse(
+          'Options',
+          envelope({
+            type: 'object',
+            properties: {
+              channels: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    key: { type: 'string', example: 'whatsapp' },
+                    label: { type: 'string', example: 'WhatsApp' },
+                    contact: {
+                      type: 'string',
+                      enum: ['phone', 'email'],
+                      description: 'What the recipient field must hold for this channel.',
+                    },
+                    available: {
+                      type: 'boolean',
+                      description: 'True when at least one PUBLISHED agent triggers on it.',
+                    },
+                    agents: {
+                      type: 'array',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          id: { type: 'string' },
+                          name: { type: 'string' },
+                          status: { type: 'string', example: 'published' },
+                          available: { type: 'boolean', description: 'Only a published agent may start a conversation.' },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          })
+        ),
+        ...COMMON_ERRORS,
+      },
+    },
+  },
+  '/conversations/outbound': {
+    post: {
+      tags: ['Conversations'],
+      summary: 'Start a new conversation (Admin, Editor)',
+      description:
+        "Starts a NEW conversation through Perfox's `POST /outbound`, as opposed to `POST /{id}/send`, which replies on an existing thread. The same trigger rule the dropdown uses is enforced here, so a caller that skips the UI cannot start a conversation on a channel the agent has no trigger for. Refused with 409 unless the agent is **published** and has a trigger for that channel, and with 400 when the recipient does not match the channel (an address for `email`, a number otherwise). **A 201 does not guarantee delivery** — check `sendAuthorized`.",
+      security: bearer,
+      requestBody: jsonBody(ref('StartConversationRequest')),
+      responses: {
+        201: okResponse(
+          'Started',
+          envelope({
+            type: 'object',
+            properties: {
+              conversationId: { type: 'string' },
+              executionId: { type: 'string' },
+              status: { type: 'string' },
+              channel: { type: 'string' },
+              sendAuthorized: {
+                type: 'boolean',
+                description: 'False means Perfox accepted the request but nothing went out.',
+              },
+              to: { type: 'string' },
+            },
+          })
+        ),
+        404: errorResponse('Unknown agent', 'That agent is not in this workspace'),
+        409: errorResponse(
+          'Not startable',
+          'Peacock Assist has no whatsapp trigger configured — it is triggered on web'
+        ),
+        ...COMMON_ERRORS,
+      },
+    },
   },
   '/conversations/{id}/send': {
     post: {

@@ -203,6 +203,14 @@ export interface AIAgent {
    * outbound on `channels` wrongly hid it.
    */
   senderChannels: string[];
+  /**
+   * Channels the agent is TRIGGERED on, from the trigger nodes on its graph.
+   *
+   * Not the same as `senderChannels`, and not the same as Perfox's `channels`
+   * field, which does not report every trigger. This is what decides whether an
+   * agent can start a conversation on a channel.
+   */
+  triggerChannels: string[];
   activeVersion: number;
   nodeCount: number;
   /** Timestamps as Perfox reports them. */
