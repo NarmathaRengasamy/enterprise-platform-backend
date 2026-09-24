@@ -585,3 +585,175 @@ export const sendOutbound = async (req: Request, res: Response, next: NextFuncti
     return next(toAppError(error, `Could not send on conversation ${req.params.id}`, log));
   }
 };
+
+/* Channels a conversation can be STARTED on. `web` is excluded: a web-chat
+   conversation begins when a visitor opens the widget, not from here. */
+const STARTABLE_CHANNELS = [
+  { key: 'whatsapp', label: 'WhatsApp', contact: 'phone' as const },
+  { key: 'sms', label: 'SMS', contact: 'phone' as const },
+  { key: 'email', label: 'Email', contact: 'email' as const },
+  /* Perfox calls this `phone`; there is no separate `call` channel. */
+  { key: 'phone', label: 'Phone call', contact: 'phone' as const },
+];
+
+/**
+ * GET /conversations/outbound/options
+ *
+ * Fills the two dropdowns for starting a conversation: a channel, and the
+ * agents that can be reached on it.
+ *
+ * Served entirely from the agent cache — `triggerChannels` is stored during the
+ * sync, so this costs ZERO Perfox calls. Reading each agent's graph on demand
+ * would be one request per agent, which is the fan-out that trips the rate
+ * limit.
+ *
+ * Every channel is returned, including ones no agent triggers on, so the UI can
+ * show them disabled rather than hiding what exists.
+ */
+export const outboundOptions = async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const agents = (await store.getAgents()) as any[];
+
+    const channels = STARTABLE_CHANNELS.map((channel) => {
+      const matching = agents
+        .filter((agent) =>
+          (agent.triggerChannels ?? [])
+            .map((c: string) => String(c).toLowerCase())
+            .includes(channel.key)
+        )
+        /* Perfox refuses outbound from an agent that is not published, so the
+           state travels with the row and the UI can disable rather than hide
+           it — "why is my agent missing" is a worse question than "why is it
+           greyed out". */
+        .map((agent) => ({
+          id: agent.id,
+          name: agent.name,
+          status: agent.status,
+          available: agent.status === 'published',
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      return {
+        key: channel.key,
+        label: channel.label,
+        /* What the recipient field must hold for this channel. */
+        contact: channel.contact,
+        available: matching.some((agent) => agent.available),
+        agents: matching,
+      };
+    });
+
+    log.debug(
+      `Outbound options: ${channels.filter((c) => c.available).length} of ${channels.length} channel(s) usable`
+    );
+    return res.status(200).json(ok({ channels }));
+  } catch (error) {
+    return next(toAppError(error, 'Could not load the outbound options', log));
+  }
+};
+
+export const startConversationSchema = z.object({
+  body: z.object({
+    agentId: z.string().trim().min(1, 'An agent is required'),
+    channel: z.enum(['whatsapp', 'sms', 'email', 'phone'], {
+      errorMap: () => ({ message: 'channel must be one of whatsapp, sms, email, phone' }),
+    }),
+    /* The destination. Trimmed first so '   ' cannot reach Perfox. */
+    to: z.string().trim().min(1, 'A phone number or email address is required'),
+    message: z.string().trim().min(1, 'An opening message is required'),
+    /* Links the new thread to a known customer when there is one. */
+    customerId: z.string().trim().optional(),
+  }),
+});
+
+/**
+ * POST /conversations/outbound
+ *
+ * Starts a NEW conversation, as opposed to `POST /:id/send`, which replies on
+ * an existing one. Wraps Perfox's `POST /outbound`.
+ *
+ * The same trigger rule the dropdown uses is enforced here, so a caller that
+ * skips the UI cannot start a conversation on a channel the agent has no
+ * trigger for.
+ */
+export const startConversation = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const agentId = String(req.body.agentId);
+    const channel = String(req.body.channel);
+    const to = String(req.body.to).trim();
+    const message = String(req.body.message).trim();
+    const customerId = String(req.body.customerId ?? '').trim();
+
+    const agent = (await store.getAgents()).find((a: any) => a.id === agentId);
+    if (!agent) throw new AppError('That agent is not in this workspace', 404);
+
+    if (agent.status !== 'published') {
+      throw new AppError(
+        `${agent.name} is ${agent.status} — only a published agent can start a conversation`,
+        409
+      );
+    }
+
+    const triggers = ((agent as any).triggerChannels ?? []).map((c: string) =>
+      String(c).toLowerCase()
+    );
+    if (!triggers.includes(channel)) {
+      throw new AppError(
+        `${agent.name} has no ${channel} trigger configured — it is triggered on ${
+          triggers.length ? triggers.join(', ') : 'no channel'
+        }`,
+        409
+      );
+    }
+
+    /* An email channel needs an address and the rest need a number. Checked
+       here so the mistake is named, rather than surfacing as a Perfox error. */
+    const wantsEmail = channel === 'email';
+    const looksLikeEmail = to.includes('@');
+    if (wantsEmail && !looksLikeEmail) {
+      throw new AppError('Email needs an email address as the recipient', 400);
+    }
+    if (!wantsEmail && looksLikeEmail) {
+      throw new AppError(`${channel} needs a phone number as the recipient`, 400);
+    }
+
+    const result = await perfoxFetch<any>('/outbound', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        agent_id: agentId,
+        channel,
+        to,
+        opening_message: message,
+        ...(customerId ? { customer_id: customerId } : {}),
+      }),
+    });
+
+    const payload = result?.data ?? result ?? {};
+    /* A 201 means Perfox accepted it, not that it went out. */
+    const sendAuthorized = payload.send_authorized !== false;
+
+    log.log(
+      `Started ${channel} conversation via ${agent.name} to ${to} -> ` +
+        `${payload.conversation_id ?? '?'}, authorized=${sendAuthorized}`
+    );
+
+    return res.status(201).json(
+      ok(
+        {
+          conversationId: payload.conversation_id ?? '',
+          executionId: payload.execution_id ?? '',
+          status: payload.status ?? '',
+          channel: payload.channel ?? channel,
+          sendAuthorized,
+          to,
+        },
+        sendAuthorized
+          ? `Conversation started on ${channel}`
+          : `Perfox accepted the request but ${agent.name} is not authorized to send on ${channel}`
+      )
+    );
+  } catch (error) {
+    return next(toAppError(error, 'Could not start the conversation', log));
+  }
+};

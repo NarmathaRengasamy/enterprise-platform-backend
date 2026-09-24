@@ -24,6 +24,7 @@ const toCachedAgent = (raw: any): Partial<AIAgent> => {
     /* Filled in by the sync, which reads the graph; a bare list read cannot
        know it, and an empty default must not overwrite a known value. */
     senderChannels: [],
+    triggerChannels: [],
     activeVersion: agent.activeVersion,
     nodeCount: agent.nodeCount,
     perfoxCreatedAt: agent.createdAt,
@@ -54,29 +55,48 @@ const AGENT_GRAPH_DELAY_MS = 900;
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * The channels one agent can reach out on, read from its graph.
+ * What one agent can do, read from its graph in a single request.
  *
- * A failure here is not fatal: the agent still syncs, it simply reports no
- * sender until the next refresh. Losing the whole sync because one graph could
- * not be read would be worse.
+ * Both halves come from the same payload on purpose: they used to be two reads
+ * of the same endpoint, which doubled the cost of a sync against an API that
+ * rate-limits with no published budget.
+ *
+ *  - `senderChannels` — the `*_sender` nodes: what it can reach out on.
+ *  - `triggerChannels` — the trigger nodes' `config.channel`: what can start a
+ *    conversation with it.
+ *
+ * A failure here is not fatal: the agent still syncs, it simply reports nothing
+ * until the next refresh. Losing a whole sync because one graph could not be
+ * read would be worse.
  */
-const readSenderChannels = async (id: string): Promise<string[]> => {
+const readGraphChannels = async (
+  id: string
+): Promise<{ senderChannels: string[]; triggerChannels: string[] }> => {
   try {
     const payload = await perfoxFetch<any>(`/agents/${encodeURIComponent(id)}`);
     const nodes = (payload?.data ?? payload)?.nodes;
-    if (!Array.isArray(nodes)) return [];
+    if (!Array.isArray(nodes)) return { senderChannels: [], triggerChannels: [] };
 
-    const channels = new Set<string>();
+    const senders = new Set<string>();
+    const triggers = new Set<string>();
+
     for (const node of nodes) {
-      const channel = SENDER_NODE_CHANNELS[String(node?.type ?? '')];
-      if (channel) channels.add(channel);
+      const sender = SENDER_NODE_CHANNELS[String(node?.type ?? '')];
+      if (sender) senders.add(sender);
+
+      if (String(node?.type ?? '') === 'trigger') {
+        const channel = String(node?.config?.channel ?? '').toLowerCase();
+        if (channel) triggers.add(channel);
+      }
     }
-    return [...channels];
+
+    return { senderChannels: [...senders], triggerChannels: [...triggers] };
   } catch (error) {
     log.warn(`Could not read the graph for agent ${id}: ${(error as Error).message}`);
-    return [];
+    return { senderChannels: [], triggerChannels: [] };
   }
 };
+
 
 const refreshFromPerfox = async (): Promise<{ synced: number; removed: number }> => {
   const payload = await perfoxFetch<{ data?: any[] }>('/agents');
@@ -87,7 +107,9 @@ const refreshFromPerfox = async (): Promise<{ synced: number; removed: number }>
      sync is not on a request path anyone is waiting behind. */
   for (let index = 0; index < agents.length; index += 1) {
     if (index > 0) await pause(AGENT_GRAPH_DELAY_MS);
-    agents[index].senderChannels = await readSenderChannels(agents[index].id!);
+    const graph = await readGraphChannels(agents[index].id!);
+    agents[index].senderChannels = graph.senderChannels;
+    agents[index].triggerChannels = graph.triggerChannels;
   }
 
   const result = await store.syncAgentsFromPerfox(agents);

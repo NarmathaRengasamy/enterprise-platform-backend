@@ -1,5 +1,8 @@
 import { Router } from 'express';
 import {
+  outboundOptions,
+  startConversation,
+  startConversationSchema,
   getConversations,
   getConversationById,
   getConversationEvents,
@@ -20,6 +23,16 @@ const router = Router();
 
 router.get('/', getConversations);
 router.get('/unread-count', getUnreadCount);
+
+/* Declared before '/:id' — Express matches in order, so a literal path that
+   comes after a parameter route is swallowed by it. */
+router.get('/outbound/options', outboundOptions);
+router.post(
+  '/outbound',
+  requireRoles('Admin', 'Editor'),
+  validateRequest(startConversationSchema),
+  startConversation
+);
 router.get('/:id', getConversationById);
 router.get('/:id/events', getConversationEvents);
 router.get('/:id/messages', getConversationMessages);

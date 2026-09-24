@@ -608,6 +608,7 @@ class DataStore {
                   description: agent.description,
                   channels: agent.channels ?? [],
                   senderChannels: agent.senderChannels ?? [],
+                  triggerChannels: agent.triggerChannels ?? [],
                   activeVersion: agent.activeVersion ?? 0,
                   nodeCount: agent.nodeCount ?? 0,
                   perfoxCreatedAt: agent.perfoxCreatedAt ?? '',
