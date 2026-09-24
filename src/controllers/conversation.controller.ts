@@ -276,6 +276,9 @@ export const getConversationById = async (
     /* The composer reads this to decide which channels it may offer. */
     if (conversation.workflowId) {
       const agent = (await store.getAgents()).find((a: any) => a.id === conversation!.workflowId);
+      /* The list rows carry this; the detail did not, so a page that only ever
+         opened one thread had no agent to attribute a call to. */
+      (conversation as any).agentId = conversation.workflowId;
       (conversation as any).agentName = agent?.name ?? '';
       (conversation as any).agentChannels = (agent as any)?.channels ?? [];
       (conversation as any).agentSenderChannels = (agent as any)?.senderChannels ?? [];
@@ -653,17 +656,26 @@ export const outboundOptions = async (_req: Request, res: Response, next: NextFu
 };
 
 export const startConversationSchema = z.object({
-  body: z.object({
-    agentId: z.string().trim().min(1, 'An agent is required'),
-    channel: z.enum(['whatsapp', 'sms', 'email', 'phone'], {
-      errorMap: () => ({ message: 'channel must be one of whatsapp, sms, email, phone' }),
+  body: z
+    .object({
+      agentId: z.string().trim().min(1, 'An agent is required'),
+      channel: z.enum(['whatsapp', 'sms', 'email', 'phone'], {
+        errorMap: () => ({ message: 'channel must be one of whatsapp, sms, email, phone' }),
+      }),
+      /* The destination. Trimmed first so '   ' cannot reach Perfox. */
+      to: z.string().trim().min(1, 'A phone number or email address is required'),
+      /* Optional upstream, and meaningless on a call: Perfox dials and the
+         agent speaks, so there is no text to open with. Still required on the
+         text channels, where a message with no message is nothing to send.
+         2000 is Perfox's own limit. */
+      message: z.string().trim().max(2000, 'An opening message cannot exceed 2000 characters').optional(),
+      /* Links the new thread to a known customer when there is one. */
+      customerId: z.string().trim().optional(),
+    })
+    .refine((body) => body.channel === 'phone' || Boolean(body.message?.trim()), {
+      message: 'An opening message is required',
+      path: ['message'],
     }),
-    /* The destination. Trimmed first so '   ' cannot reach Perfox. */
-    to: z.string().trim().min(1, 'A phone number or email address is required'),
-    message: z.string().trim().min(1, 'An opening message is required'),
-    /* Links the new thread to a known customer when there is one. */
-    customerId: z.string().trim().optional(),
-  }),
 });
 
 /**
@@ -681,7 +693,7 @@ export const startConversation = async (req: Request, res: Response, next: NextF
     const agentId = String(req.body.agentId);
     const channel = String(req.body.channel);
     const to = String(req.body.to).trim();
-    const message = String(req.body.message).trim();
+    const message = String(req.body.message ?? '').trim();
     const customerId = String(req.body.customerId ?? '').trim();
 
     const agent = (await store.getAgents()).find((a: any) => a.id === agentId);
@@ -724,14 +736,18 @@ export const startConversation = async (req: Request, res: Response, next: NextF
         agent_id: agentId,
         channel,
         to,
-        opening_message: message,
+        /* Omitted rather than sent empty: the field is optional upstream and a
+           call has nothing to open with. */
+        ...(message ? { opening_message: message } : {}),
         ...(customerId ? { customer_id: customerId } : {}),
       }),
     });
 
     const payload = result?.data ?? result ?? {};
-    /* A 201 means Perfox accepted it, not that it went out. */
-    const sendAuthorized = payload.send_authorized !== false;
+    /* A 201 means Perfox accepted it, not that it went out. `send_authorized`
+       reports the Sender node, which only applies to the text channels — a call
+       does not need one. */
+    const sendAuthorized = channel === 'phone' || payload.send_authorized !== false;
 
     log.log(
       `Started ${channel} conversation via ${agent.name} to ${to} -> ` +

@@ -22,6 +22,7 @@ import {
 } from '../controllers/kb.controller.js';
 import { setAgentStatusSchema } from '../controllers/perfox.controller.js';
 import { generateCatalogSchema } from '../controllers/kb.controller.js';
+import { saveOperatorSiteSchema } from '../controllers/platform.controller.js';
 import {
   sendOutboundSchema,
   startConversationSchema,
@@ -167,10 +168,25 @@ const schemas: Record<string, unknown> = {
         description: 'Display name, derived by the server from categoryId. Never accepted from a client.',
       },
       categoryCode: { type: 'string', deprecated: true, description: 'Mirror of categoryId.' },
-      price: { type: 'number', example: 1299 },
+      price: {
+        type: 'number',
+        example: 1299,
+        description:
+          'OPTIONAL. Absent when the offering has not been priced yet — an offering can be created before anyone has decided what it costs. With variants and no base price, this is the cheapest PRICED variant; absent when none of them carry a price.',
+      },
       originalPrice: { type: 'number' },
-      stock: { type: 'integer', example: 142 },
-      stockStatus: { type: 'string', enum: ['In Stock', 'Low Stock', 'Out of Stock'] },
+      stock: {
+        type: 'integer',
+        example: 142,
+        description:
+          'OPTIONAL and never defaulted. Absent means the figure is UNKNOWN, which is not the same as 0 on the shelf. With variants, this is the sum of the variants that actually carry a capacity; absent when none do.',
+      },
+      stockStatus: {
+        type: 'string',
+        enum: ['In Stock', 'Low Stock', 'Out of Stock', 'Unspecified'],
+        description:
+          '`Unspecified` when no stock figure has been entered. A distinct value rather than an absent one, so it can be filtered, counted and displayed like any other. Never report an unknown stock as `Out of Stock` — sold out is a claim about the shelf, an empty field is a claim about the form.',
+      },
       committed: { type: 'integer' },
       reorderPoint: { type: 'integer' },
       margin: { type: 'string', example: '54.2%' },
@@ -419,6 +435,7 @@ const schemas: Record<string, unknown> = {
   GenerateCatalogRequest: bodyOf(generateCatalogSchema),
   SendOutboundRequest: bodyOf(sendOutboundSchema),
   StartConversationRequest: bodyOf(startConversationSchema),
+  SaveOperatorSiteRequest: bodyOf(saveOperatorSiteSchema),
   CreateFolderRequest: bodyOf(createFolderSchema),
   UploadMarkdownRequest: bodyOf(uploadMarkdownSchema),
   CreateEndpointRequest: bodyOf(createEndpointSchema),
@@ -501,7 +518,12 @@ const paths: Record<string, unknown> = {
       parameters: listParams([
         { name: 'categoryId', in: 'query', schema: { type: 'string' }, description: 'Preferred: filter by the category id.' },
         { name: 'category', in: 'query', schema: { type: 'string' }, description: 'Legacy: filter by category name.' },
-        { name: 'status', in: 'query', schema: { type: 'string', enum: ['In Stock', 'Low Stock', 'Out of Stock'] } },
+        {
+          name: 'status',
+          in: 'query',
+          schema: { type: 'string', enum: ['In Stock', 'Low Stock', 'Out of Stock', 'Unspecified'] },
+          description: 'Filter by stock status. A product with no stock figure matches only `Unspecified`.',
+        },
       ]),
       responses: { 200: listOf('Product'), ...COMMON_ERRORS },
     },
@@ -509,7 +531,7 @@ const paths: Record<string, unknown> = {
       tags: ['Products'],
       summary: 'Create a product',
       description:
-        'Requires `categoryId`; the server resolves it and derives `category`. `price` is required only when there are no variants — otherwise every variant needs its own price and the base price is the cheapest of them.',
+        'Requires `categoryId`; the server resolves it and derives `category`. **`price` and `stock` are both optional**, on the offering and on every variant: an offering can be created before it has been priced or counted. Do NOT send `0` for a value nobody entered — omit the field. A sent `0` is a real figure and will be treated as free, or as sold out. With variants and no base price, the listing price is the cheapest variant that has one, and the stock is the sum of the variants that carry a capacity; both stay absent when none do. Stock status derives to `Unspecified` when there is no stock figure.',
       security: bearer,
       requestBody: jsonBody(ref('CreateProductRequest')),
       responses: {
@@ -525,7 +547,28 @@ const paths: Record<string, unknown> = {
       tags: ['Products'],
       summary: 'Catalog-wide counters (never page-scoped)',
       security: bearer,
-      responses: { 200: okResponse('Stats', envelope({ type: 'object' })), ...COMMON_ERRORS },
+      responses: {
+        200: okResponse(
+          'Stats',
+          envelope({
+            type: 'object',
+            properties: {
+              total: { type: 'integer' },
+              inStock: { type: 'integer' },
+              lowStock: { type: 'integer' },
+              outOfStock: { type: 'integer' },
+              stockNotSet: {
+                type: 'integer',
+                description:
+                  'Products with no stock figure (stockStatus `Unspecified`). Include it: the four counts sum to `total`, and leaving it out makes the tiles appear not to add up.',
+              },
+              categoriesCount: { type: 'integer' },
+              inStockPercentage: { type: 'integer' },
+            },
+          })
+        ),
+        ...COMMON_ERRORS,
+      },
     },
   },
   '/products/export': {
@@ -759,7 +802,7 @@ const paths: Record<string, unknown> = {
       tags: ['Conversations'],
       summary: 'Start a new conversation (Admin, Editor)',
       description:
-        "Starts a NEW conversation through Perfox's `POST /outbound`, as opposed to `POST /{id}/send`, which replies on an existing thread. The same trigger rule the dropdown uses is enforced here, so a caller that skips the UI cannot start a conversation on a channel the agent has no trigger for. Refused with 409 unless the agent is **published** and has a trigger for that channel, and with 400 when the recipient does not match the channel (an address for `email`, a number otherwise). **A 201 does not guarantee delivery** — check `sendAuthorized`.",
+        "Starts a NEW conversation through Perfox's `POST /outbound`, as opposed to `POST /{id}/send`, which replies on an existing thread. The same trigger rule the dropdown uses is enforced here, so a caller that skips the UI cannot start a conversation on a channel the agent has no trigger for. Refused with 409 unless the agent is **published** and has a trigger for that channel, and with 400 when the recipient does not match the channel (an address for `email`, a number otherwise). **A 201 does not guarantee delivery** — check `sendAuthorized`, which reports the agent's Sender node and therefore applies to the text channels only.\n\n`message` is REQUIRED for `whatsapp`, `sms` and `email` — a message with no message is nothing to send — and OPTIONAL for `phone`, which Perfox also marks optional: a call has nothing to open with. Max 2000 characters, Perfox's own limit.\n\nNOTE on `phone`: this makes the **AI AGENT** place the call. The UI does NOT use it for the Call button — a human operator dials through the `@perfox/operator-react` SDK instead (see `POST /operator/sign`). Both are real capabilities; do not wire one to the other.",
       security: bearer,
       requestBody: jsonBody(ref('StartConversationRequest')),
       responses: {
@@ -1292,6 +1335,54 @@ const paths: Record<string, unknown> = {
     get: { tags: ['Developer'], summary: 'One endpoint (Admin)', security: bearer, parameters: [pathId()], responses: { 200: oneOf('Endpoint'), 404: errorResponse('Missing', 'Endpoint not found'), ...COMMON_ERRORS } },
     put: { tags: ['Developer'], summary: 'Update an endpoint (Admin)', security: bearer, parameters: [pathId()], requestBody: jsonBody(ref('UpdateEndpointRequest')), responses: { 200: oneOf('Endpoint'), ...COMMON_ERRORS } },
     delete: { tags: ['Developer'], summary: 'Delete an endpoint (Admin)', security: bearer, parameters: [pathId()], responses: { 200: okResponse('Deleted', envelope({ type: 'object' })), ...COMMON_ERRORS } },
+  },
+  '/developer/platform/operator': {
+    put: {
+      tags: ['Developer'],
+      summary: 'Save the Perfox operator site (Admin)',
+      description:
+        "The Perfox **Site** a human operator signs in against — distinct from the workspace connection, which is how this service calls Perfox. Stored nested inside the single platform-connection row, so it lives with the tenant it belongs to. `siteSecret` is write-only: stored `select: false`, stripped from every response, and only ever echoed masked. Sending an empty `siteSecret` keeps the stored one, so the host can be corrected without retyping it. `apiHost` is validated: it must be the `-api` host and must not carry a `/api/v1` path — both mistakes surface in the browser as an unexplained CORS error. Returns 409 until the workspace connection exists.",
+      security: bearer,
+      requestBody: jsonBody(ref('SaveOperatorSiteRequest')),
+      responses: {
+        200: okResponse('Saved', envelope({ type: 'object' })),
+        409: errorResponse(
+          'No workspace connection',
+          'Configure the Perfox workspace connection before the operator site'
+        ),
+        ...COMMON_ERRORS,
+      },
+    },
+  },
+  '/operator/sign': {
+    post: {
+      tags: ['Developer'],
+      summary: 'Sign the current user as a Perfox operator',
+      description:
+        "Mints the identity the `@perfox/operator-react` SDK needs to go online, and the only thing standing between a browser and Perfox's operator routes. `userHash = HMAC_SHA256(siteSecret, siteId + '.' + externalId)`; the secret never leaves the server, only the signature. `externalId` is derived from the authenticated session (`op_<userId>`), NEVER from the request body — otherwise any signed-in user could ask us to vouch for somebody else's operator identity. Deliberately mounted outside the Admin-only `/developer` hub: configuring the site is an administrative act, taking a call is not. Returns 409 when no operator site is configured.",
+      security: bearer,
+      responses: {
+        200: okResponse(
+          'Signed',
+          envelope({
+            type: 'object',
+            properties: {
+              apiHost: { type: 'string', example: 'https://acme-api.perfox.ai' },
+              siteId: { type: 'string' },
+              workflowId: { type: 'string', nullable: true },
+              externalId: { type: 'string', example: 'op_6650f1c2a9' },
+              name: { type: 'string' },
+              userHash: { type: 'string', description: 'Hex HMAC proving this server vouched for the operator.' },
+            },
+          })
+        ),
+        409: errorResponse(
+          'No operator site',
+          'The Perfox operator site is not configured — add it in the Developer hub'
+        ),
+        ...COMMON_ERRORS,
+      },
+    },
   },
   '/developer/endpoints/{id}/ping': {
     post: {

@@ -139,7 +139,11 @@ class DataStore {
       result = result.filter((p) => p.category?.toLowerCase() === filters.category!.toLowerCase());
     }
     if (filters?.status && filters.status !== 'all' && filters.status !== 'All') {
-      result = result.filter((p) => p.stockStatus.toLowerCase() === filters.status!.toLowerCase());
+      /* A product with no stock figure has no status, so it matches no status
+         filter — rather than throwing on the missing value. */
+      result = result.filter(
+        (p) => (p.stockStatus ?? '').toLowerCase() === filters.status!.toLowerCase()
+      );
     }
     if (filters?.search) {
       const q = filters.search.toLowerCase();
@@ -691,7 +695,12 @@ class DataStore {
   async getPlatformConnection(withToken = false): Promise<PlatformConnection | undefined> {
     if (isDbConnected()) {
       const query = PlatformConnectionModel.findOne({ id: PLATFORM_CONNECTION_ID });
-      const doc = await (withToken ? query.select('+apiToken') : query).lean();
+      /* Both secrets travel together: a caller asking for the credentials wants
+         to USE them, and two separate doors would mean two places to get the
+         `select: false` wrong. */
+      const doc = await (
+        withToken ? query.select('+apiToken +operatorSite.siteSecret') : query
+      ).lean();
       return (doc as any) ?? undefined;
     }
     if (!this.platformConnection) return undefined;

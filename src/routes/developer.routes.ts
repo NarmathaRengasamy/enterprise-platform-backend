@@ -16,6 +16,8 @@ import {
   disconnectPlatform,
   requirePlatformConnection,
   savePlatformConnectionSchema,
+  saveOperatorSite,
+  saveOperatorSiteSchema,
 } from '../controllers/platform.controller.js';
 import {
   listAgents as listCachedAgents,
@@ -39,6 +41,15 @@ router.get('/platform', getPlatformConnection);
 router.put('/platform', validateRequest(savePlatformConnectionSchema), savePlatformConnection);
 router.post('/platform/test', testPlatformConnection);
 router.delete('/platform', disconnectPlatform);
+
+/* The operator site: the Perfox Site a human operator signs in against. Saved
+   here because it is a credential; the signing route itself is mounted outside
+   this Admin-only hub, since operators are not administrators. */
+router.put(
+  '/platform/operator',
+  validateRequest(saveOperatorSiteSchema),
+  saveOperatorSite
+);
 
 /* Everything below needs a Perfox workspace to mean anything. */
 router.use(['/agents', '/endpoints'], requirePlatformConnection);

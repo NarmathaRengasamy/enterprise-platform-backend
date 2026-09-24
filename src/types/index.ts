@@ -41,9 +41,10 @@ export interface ProductGalleryItem {
 export interface ProductVariant {
   option: string;
   value: string;
-  price: number;
-  stock: string;
-  status: 'In Stock' | 'Low Stock' | 'Out of Stock';
+  /** Optional: a variant can exist before it is priced. */
+  price?: number;
+  stock?: string;
+  status?: 'In Stock' | 'Low Stock' | 'Out of Stock' | 'Unspecified';
 }
 
 export interface ProductVideo {
@@ -64,10 +65,19 @@ export interface Product {
   category: string;
   /** @deprecated mirror of categoryId */
   categoryCode: string;
-  price: number;
+  /** Optional: an offering can be created before it is priced. */
+  price?: number;
   originalPrice?: number;
-  stock: number;
-  stockStatus: 'In Stock' | 'Low Stock' | 'Out of Stock';
+  /** Optional and NOT defaulted — absent means unknown, not zero. */
+  stock?: number;
+  /**
+   * `Unspecified` when no stock figure has been entered.
+   *
+   * A distinct value rather than an absent one: "we do not know" is a real
+   * state a person can see, filter by and act on, whereas a missing field is
+   * something every caller has to remember to handle.
+   */
+  stockStatus?: 'In Stock' | 'Low Stock' | 'Out of Stock' | 'Unspecified';
   committed: number;
   reorderPoint: number;
   margin: string;
@@ -280,7 +290,39 @@ export interface PlatformConnection {
   lastError?: string;
   connectedBy?: string;
   updatedAt?: string;
+  /** The operator site, when one has been configured. */
+  operatorSite?: PlatformOperatorSite;
+}
 
+/**
+ * The Perfox **Site** a human operator signs in against — separate from the
+ * workspace API above.
+ *
+ * Read from Perfox Studio -> Sites and entered in the Developer hub rather than
+ * the environment, so it can be changed without a redeploy, like the rest of
+ * this row.
+ */
+export interface PlatformOperatorSite {
+  /**
+   * The API host, e.g. `https://acme-api.perfox.ai`.
+   *
+   * NOT the same value as `apiUrl` above, which carries the `/api/v1` suffix,
+   * and not the Studio host: `https://acme.perfox.ai` answers 405 with no CORS
+   * headers, which the browser reports as an opaque CORS failure.
+   */
+  apiHost: string;
+  siteId: string;
+  /**
+   * The site secret. Never leaves the server: it signs the operator identity
+   * and is stripped from every response, exactly like `apiToken`.
+   *
+   * Anyone holding it can sign as ANY operator on the site.
+   */
+  siteSecret: string;
+  /** Optional — the workflow a call runs through. */
+  workflowId: string;
+  configuredAt: string;
+  configuredBy: string;
 }
 
 /**
