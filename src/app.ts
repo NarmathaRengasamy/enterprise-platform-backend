@@ -23,6 +23,8 @@ import knowledgeRoutes from './routes/knowledge.routes.js';
 import teamRoutes from './routes/team.routes.js';
 import developerRoutes from './routes/developer.routes.js';
 import operatorRoutes from './routes/operator.routes.js';
+import mcpRoutes from './routes/mcp.routes.js';
+import publicRoutes from './routes/public.routes.js';
 
 export const createApp = (): Express => {
   const app = express();
@@ -117,6 +119,16 @@ export const createApp = (): Express => {
   apiRouter.use('/operator', operatorRoutes);
 
   app.use('/api/v1', apiRouter);
+
+  /* MCP sits OUTSIDE the API router on purpose: its caller is an AI agent on
+     the Perfox platform, not a signed-in member of staff, so it carries a
+     shared secret rather than a user JWT. */
+  app.use('/mcp', mcpRoutes);
+
+  /* The public catalogue: unauthenticated, read-only, rate limited. Outside the
+     API router for the same reason as MCP — its caller is a shopper on a
+     website, not a member of staff with a session. */
+  app.use('/public', publicRoutes);
 
   // Root welcome
   app.get('/', (_req: Request, res: Response) => {
