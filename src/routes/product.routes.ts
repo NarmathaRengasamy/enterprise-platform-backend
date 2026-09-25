@@ -2,6 +2,8 @@ import { Router } from 'express';
 import {
   getProducts,
   getProductById,
+  getProductsByIds,
+  getProductsByIdsSchema,
   getProductStats,
   exportProducts,
   createProduct,
@@ -21,6 +23,10 @@ router.get('/export', exportProducts);
 
 router.get('/', getProducts);
 router.get('/:id', getProductById);
+
+/* Declared before the write routes and after '/:id' is irrelevant here — it is a
+   distinct literal path. POST because a list of ids belongs in a body. */
+router.post('/batch', validateRequest(getProductsByIdsSchema), getProductsByIds);
 
 router.post('/', requireRoles('Admin', 'Editor'), validateRequest(createProductSchema), createProduct);
 router.put('/:id', requireRoles('Admin', 'Editor'), validateRequest(updateProductSchema), updateProduct);

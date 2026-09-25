@@ -23,6 +23,11 @@ import {
 import { setAgentStatusSchema } from '../controllers/perfox.controller.js';
 import { generateCatalogSchema } from '../controllers/kb.controller.js';
 import { saveOperatorSiteSchema } from '../controllers/platform.controller.js';
+import { getProductsByIdsSchema } from '../controllers/product.controller.js';
+import {
+  publicProductsSchema,
+  publicCategoriesSchema,
+} from '../routes/public.routes.js';
 import {
   sendOutboundSchema,
   startConversationSchema,
@@ -435,6 +440,9 @@ const schemas: Record<string, unknown> = {
   GenerateCatalogRequest: bodyOf(generateCatalogSchema),
   SendOutboundRequest: bodyOf(sendOutboundSchema),
   StartConversationRequest: bodyOf(startConversationSchema),
+  ProductBatchRequest: bodyOf(getProductsByIdsSchema),
+  PublicProductsRequest: bodyOf(publicProductsSchema),
+  PublicCategoriesRequest: bodyOf(publicCategoriesSchema),
   SaveOperatorSiteRequest: bodyOf(saveOperatorSiteSchema),
   CreateFolderRequest: bodyOf(createFolderSchema),
   UploadMarkdownRequest: bodyOf(uploadMarkdownSchema),
@@ -524,6 +532,19 @@ const paths: Record<string, unknown> = {
           schema: { type: 'string', enum: ['In Stock', 'Low Stock', 'Out of Stock', 'Unspecified'] },
           description: 'Filter by stock status. A product with no stock figure matches only `Unspecified`.',
         },
+        {
+          name: 'priceMin',
+          in: 'query',
+          schema: { type: 'number' },
+          description:
+            'Lowest price to include, inclusive. A product with no price recorded is excluded from a priced search \u2014 "under 5000" cannot honestly include something nobody priced.',
+        },
+        {
+          name: 'priceMax',
+          in: 'query',
+          schema: { type: 'number' },
+          description: 'Highest price to include, inclusive.',
+        },
       ]),
       responses: { 200: listOf('Product'), ...COMMON_ERRORS },
     },
@@ -538,6 +559,31 @@ const paths: Record<string, unknown> = {
         201: oneOf('Product'),
         400: errorResponse('Bad pricing or unknown category', 'categoryId "CAT-999" does not match any category'),
         409: errorResponse('Duplicate SKU', 'A record with that sku already exists'),
+        ...COMMON_ERRORS,
+      },
+    },
+  },
+  '/products/batch': {
+    post: {
+      tags: ['Products'],
+      summary: 'Fetch several products by id',
+      description:
+        'Several products in one request. A POST rather than a GET because a list of ids belongs in a body: a URL has a length limit, and ids can contain characters that would have to be escaped into it. Ids are de-duplicated, and a maximum of 100 are accepted. Unknown ids are reported in `missing` rather than failing the call \u2014 asking for ten products returns the nine that exist, and names the one that does not.',
+      security: bearer,
+      requestBody: jsonBody(ref('ProductBatchRequest')),
+      responses: {
+        200: okResponse(
+          'Products',
+          envelope({
+            type: 'object',
+            properties: {
+              requested: { type: 'integer' },
+              returned: { type: 'integer' },
+              missing: { type: 'array', items: { type: 'string' }, description: 'Ids that do not exist.' },
+              products: { type: 'array', items: ref('Product') },
+            },
+          })
+        ),
         ...COMMON_ERRORS,
       },
     },
@@ -1335,6 +1381,104 @@ const paths: Record<string, unknown> = {
     get: { tags: ['Developer'], summary: 'One endpoint (Admin)', security: bearer, parameters: [pathId()], responses: { 200: oneOf('Endpoint'), 404: errorResponse('Missing', 'Endpoint not found'), ...COMMON_ERRORS } },
     put: { tags: ['Developer'], summary: 'Update an endpoint (Admin)', security: bearer, parameters: [pathId()], requestBody: jsonBody(ref('UpdateEndpointRequest')), responses: { 200: oneOf('Endpoint'), ...COMMON_ERRORS } },
     delete: { tags: ['Developer'], summary: 'Delete an endpoint (Admin)', security: bearer, parameters: [pathId()], responses: { 200: okResponse('Deleted', envelope({ type: 'object' })), ...COMMON_ERRORS } },
+  },
+  '/public/products': {
+    post: {
+      tags: ['Public catalogue'],
+      summary: 'Browse the catalogue (no authentication)',
+      description:
+        "The catalogue for a customer-facing site. **Unauthenticated** \u2014 mounted outside `/api/v1`, so it never touches the JWT router, and read-only: there is no public write.\n\nA POST rather than a GET because a storefront filter set is a structure \u2014 several categories, a price range, a sort \u2014 which belongs in a body rather than a query string that has to be escaped and length-limited.\n\n**Newest first by default**: a storefront's opening question is \"what is new\", not \"what is alphabetically first\". Pass `sortBy` to change it.\n\n`search` also matches variant values, so \"blue\" finds a product whose Ocean Blue variant exists. Sorting by `price` ascending puts unpriced products LAST, not first \u2014 a product nobody priced is not the cheapest one.\n\nInternal figures (`margin`, `committed`, `reorderPoint`, `originalPrice`, `discount`) are stripped before anything leaves. An absent price or stock comes back as `null` with a `priceNote` / `stockNote` saying not to quote or claim a figure.\n\nRate limited per IP (default 120/minute, `PUBLIC_API_RATE_LIMIT`); over the limit returns **429** with `Retry-After`. The limiter is in-process: a floor against a crawler or a runaway client, not a defence against a distributed attack. Behind a load balancer, set a real limit there too.",
+      requestBody: jsonBody(ref('PublicProductsRequest')),
+      responses: {
+        200: okResponse(
+          'Catalogue page',
+          envelope({
+            type: 'object',
+            properties: {
+              products: { type: 'array', items: ref('Product') },
+              total: { type: 'integer', description: 'Matches across every page, not this page.' },
+              page: { type: 'integer' },
+              limit: { type: 'integer', description: 'Capped at 50.' },
+              totalPages: { type: 'integer' },
+            },
+          })
+        ),
+        400: errorResponse('Validation failed', 'Number must be less than or equal to 50'),
+        429: errorResponse('Rate limited', 'Too many requests. Try again in 42 seconds.'),
+      },
+    },
+  },
+  '/public/categories': {
+    post: {
+      tags: ['Public catalogue'],
+      summary: 'List categories (no authentication)',
+      description:
+        'The categories a storefront navigates by. Unauthenticated and read-only, like `/public/products`, and a POST for symmetry with it so a client has one shape to learn. Rate limited the same way.',
+      requestBody: jsonBody(ref('PublicCategoriesRequest')),
+      responses: {
+        200: okResponse(
+          'Categories',
+          envelope({
+            type: 'object',
+            properties: {
+              categories: { type: 'array', items: ref('Category') },
+              total: { type: 'integer' },
+            },
+          })
+        ),
+        400: errorResponse('Validation failed', 'Number must be less than or equal to 200'),
+        429: errorResponse('Rate limited', 'Too many requests. Try again in 42 seconds.'),
+      },
+    },
+  },
+  '/mcp': {
+    post: {
+      tags: ['MCP'],
+      summary: 'MCP catalogue tools over JSON-RPC 2.0',
+      description:
+        "Model Context Protocol endpoint, so an AI agent can read the catalogue as tools. Methods: `initialize`, `tools/list`, `tools/call`. Tools exposed: **list_products** (search, category, price range, status, sort, paging), **get_products** (several ids at once), **list_categories**, **get_category**.\n\nMounted OUTSIDE `/api/v1` and therefore outside the JWT router: the caller is an agent on the Perfox platform, not a signed-in member of staff. It authenticates with the shared secret in `MCP_TOKEN` as a Bearer token; when that variable is unset the endpoint is OPEN, which is acceptable locally and nowhere else \u2014 `GET /mcp/health` reports which it is.\n\nThe tools read the datastore directly rather than looping back through this API, so there is no service token and no self-request. Internal figures (`margin`, `committed`, `reorderPoint`, `originalPrice`) are stripped before anything reaches the agent, and an absent price or stock is returned as `null` with a note telling the agent not to quote or claim a figure.",
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              required: ['jsonrpc', 'method'],
+              properties: {
+                jsonrpc: { type: 'string', enum: ['2.0'] },
+                id: { description: 'Any JSON-RPC id; echoed back.' },
+                method: { type: 'string', enum: ['initialize', 'tools/list', 'tools/call'] },
+                params: {
+                  type: 'object',
+                  description: "For tools/call: `{ name, arguments }`.",
+                },
+              },
+            },
+          },
+        },
+      },
+      responses: {
+        200: {
+          description:
+            'A JSON-RPC response. Always 200 \u2014 failures are carried in the `error` member, per JSON-RPC, not in the HTTP status. Codes: -32600 invalid request, -32601 unknown method or tool, -32603 tool failure, -32001 unauthorized.',
+          content: { 'application/json': { schema: { type: 'object' } } },
+        },
+      },
+    },
+  },
+  '/mcp/health': {
+    get: {
+      tags: ['MCP'],
+      summary: 'MCP liveness and exposed tools',
+      description:
+        'Reports the tools this server exposes and, importantly, whether the endpoint is secured \u2014 `secured: false` means `MCP_TOKEN` is unset and anyone who can reach the port can read the catalogue.',
+      responses: {
+        200: {
+          description: 'Health',
+          content: { 'application/json': { schema: { type: 'object' } } },
+        },
+      },
+    },
   },
   '/developer/platform/operator': {
     put: {

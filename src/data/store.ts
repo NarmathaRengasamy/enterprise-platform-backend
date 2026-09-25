@@ -106,6 +106,10 @@ class DataStore {
     category?: string;
     status?: string;
     search?: string;
+    /* Inclusive bounds. A product with no price is excluded from a priced
+       search: "under 5000" cannot honestly include something nobody priced. */
+    priceMin?: number;
+    priceMax?: number;
     sort?: Record<string, 1 | -1>;
   }): Promise<Product[]> {
     const sort = filters?.sort ?? { createdAt: -1 };
@@ -123,7 +127,23 @@ class DataStore {
       }
       if (filters?.search) {
         const regex = new RegExp(escapeRegex(filters.search), 'i');
-        query.$or = [{ name: regex }, { sku: regex }, { category: regex }];
+        /* Variant values are searched too: a shopper looking for "blue" means
+           the Ocean Blue variant, and matching only the product name misses it
+           entirely. */
+        query.$or = [
+          { name: regex },
+          { sku: regex },
+          { category: regex },
+          { brand: regex },
+          { 'variants.value': regex },
+          { 'variants.option': regex },
+        ];
+      }
+
+      if (typeof filters?.priceMin === 'number' || typeof filters?.priceMax === 'number') {
+        query.price = {};
+        if (typeof filters.priceMin === 'number') query.price.$gte = filters.priceMin;
+        if (typeof filters.priceMax === 'number') query.price.$lte = filters.priceMax;
       }
 
       /* An empty result is a legitimate answer — the old code fell through to the

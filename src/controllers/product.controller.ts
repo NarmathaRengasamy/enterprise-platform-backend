@@ -132,13 +132,25 @@ const assertPricing = (body: any): void => {
 export const getProducts = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { page, limit, skip } = getPageParams(req);
-    const { categoryId, category, status, search, sortBy, sortOrder } = req.query;
+    const { categoryId, category, status, search, sortBy, sortOrder, priceMin, priceMax } =
+      req.query;
+
+    /* Parsed rather than cast: `Number('')` is 0, which would silently become a
+       real lower bound of zero. */
+    const toBound = (raw: unknown): number | undefined => {
+      const text = String(raw ?? '').trim();
+      if (!text) return undefined;
+      const value = Number(text);
+      return Number.isFinite(value) ? value : undefined;
+    };
 
     const all = await store.getProducts({
       categoryId: categoryId as string,
       category: category as string,
       status: status as string,
       search: search as string,
+      priceMin: toBound(priceMin),
+      priceMax: toBound(priceMax),
       sort: buildSort(sortBy, sortOrder, SORTABLE, { createdAt: -1 }),
     });
 
@@ -146,6 +158,57 @@ export const getProducts = async (req: Request, res: Response, next: NextFunctio
     res.status(200).json(paginated(all.slice(skip, skip + limit), all.length, page, limit));
   } catch (error) {
     next(toAppError(error, 'Could not load products', log));
+  }
+};
+
+export const getProductsByIdsSchema = z.object({
+  body: z.object({
+    ids: z
+      .array(z.string().trim().min(1))
+      .min(1, 'At least one id is required')
+      .max(100, 'At most 100 ids per request'),
+  }),
+});
+
+/**
+ * POST /products/batch
+ *
+ * Several products in one request. A POST rather than a GET because a list of
+ * ids belongs in a body: a URL has a length limit, and ids can contain
+ * characters that would have to be escaped into it.
+ *
+ * Unknown ids are reported in `missing` rather than failing the call — a caller
+ * asking for ten products should get the nine that exist, and be told which one
+ * did not.
+ */
+export const getProductsByIds = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    const ids: string[] = [
+      ...new Set<string>(req.body.ids.map((id: unknown) => String(id).trim())),
+    ];
+
+    const found = await Promise.all(ids.map((id) => store.getProductById(id)));
+    const products = found.filter(Boolean) as Product[];
+    const missing = ids.filter((id, index) => !found[index]);
+
+    if (missing.length) {
+      log.debug(`getProductsByIds -> ${missing.length} unknown id(s)`, { missing });
+    }
+
+    res.status(200).json(
+      ok({
+        requested: ids.length,
+        returned: products.length,
+        missing,
+        products,
+      })
+    );
+  } catch (error) {
+    next(toAppError(error, 'Could not load the requested products', log));
   }
 };
 
