@@ -137,6 +137,9 @@ class DataStore {
           { brand: regex },
           { 'variants.value': regex },
           { 'variants.option': regex },
+          { 'variants.attributes.value': regex },
+          { 'variants.sku': regex },
+          { 'variants.description': regex },
         ];
       }
 

@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import { isDbConnected } from '../config/db.js';
 import { UserModel } from '../models/User.model.js';
 import { AIAgentModel } from '../models/Agent.model.js';
+import { ProductModel } from '../models/Product.model.js';
 import { PlatformConnectionModel } from '../models/PlatformConnection.model.js';
 import { store } from './store.js';
 import { createLogger } from '../utils/logger.js';
@@ -211,10 +212,71 @@ export const dropMockKnowledgeArticles = async (): Promise<void> => {
   }
 };
 
+/**
+ * Gives every existing variant the identity and attributes the new shape needs.
+ *
+ * An old variant is `{ option: 'Colour', value: 'Ocean Blue' }` — one axis
+ * already, just written as a label. It becomes a single-entry `attributes`
+ * array plus a `variantId` and a `sku`, so old rows are queryable the same way
+ * new ones are and nothing has to special-case them.
+ *
+ * Idempotent: only variants missing `attributes` are touched.
+ */
+export const backfillVariantIdentity = async (): Promise<void> => {
+  try {
+    if (!isDbConnected()) {
+      log.debug('No database connection — skipping the variant backfill');
+      return;
+    }
+
+    const slug = (text: string): string =>
+      String(text)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 24);
+
+    const products = await ProductModel.find({
+      'variants.0': { $exists: true },
+      'variants.attributes': { $exists: false },
+    }).lean();
+
+    let touched = 0;
+    for (const product of products as any[]) {
+      const variants = (product.variants ?? []).map((v: any, index: number) => {
+        if (Array.isArray(v?.attributes) && v.attributes.length) return v;
+
+        const name = String(v?.option ?? 'Option').trim() || 'Option';
+        const value = String(v?.value ?? 'Standard').trim() || 'Standard';
+        const base = String(product.sku ?? product.id ?? 'PRD');
+
+        return {
+          ...v,
+          attributes: [{ name, value }],
+          variantId: v?.variantId || `${base}-${slug(value) || index + 1}`,
+          sku: v?.sku || `${base}-${index + 1}`,
+        };
+      });
+
+      await ProductModel.updateOne({ _id: product._id }, { $set: { variants } });
+      touched += 1;
+    }
+
+    if (touched) {
+      log.log(`Backfilled variant identity on ${touched} product(s)`);
+    } else {
+      log.debug('Every variant already carries attributes');
+    }
+  } catch (error) {
+    log.error(`Variant backfill failed: ${(error as Error).message}`);
+  }
+};
+
 export const runMigrations = async (): Promise<void> => {
   await repairUnusablePasswords();
   await backfillCategoryIds();
   await dropRetiredAgentFields();
+  await backfillVariantIdentity();
   await dropPlatformKbFolder();
   await dropMockKnowledgeArticles();
 };
