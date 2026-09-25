@@ -1,13 +1,29 @@
 import mongoose, { Schema } from 'mongoose';
 import { Product } from '../types/index.js';
 
+/* `_id: false` — an axis is a value, not a row of its own. */
+const VariantAttributeSchema = new Schema(
+  { name: { type: String, required: true }, value: { type: String, required: true } },
+  { _id: false }
+);
+
 const ProductVariantSchema = new Schema(
   {
+    /* Identity. Without it a variant cannot be linked to or ordered. */
+    variantId: { type: String },
+    sku: { type: String },
+    /* The real definition of the combination; option/value are derived from it. */
+    attributes: { type: [VariantAttributeSchema], default: undefined },
+    description: { type: String, default: '' },
+    image: { type: String, default: '' },
     option: { type: String, required: true },
     value: { type: String, required: true },
     /* Optional: a variant can exist before it is priced. */
     price: { type: Number },
-    stock: { type: String, default: '10 units' },
+    /* No default. '10 units' was invented for every variant nobody gave a
+       figure for, so a row could read "Unspecified" and "10 units" at once,
+       and the product roll-up disagreed with the variants underneath it. */
+    stock: { type: String },
     status: {
       type: String,
       enum: ['In Stock', 'Low Stock', 'Out of Stock', 'Unspecified'],

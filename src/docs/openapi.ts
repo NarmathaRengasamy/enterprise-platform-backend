@@ -160,6 +160,68 @@ const schemas: Record<string, unknown> = {
     },
   },
 
+  ProductVariant: {
+    type: 'object',
+    description:
+      'One combination of a product. `attributes` is the DEFINITION; `option` and `value` are a display label the server derives from it and are read-only. A caller sending the old single-axis shape (`option` + `value`) still works \u2014 it becomes a one-entry `attributes` array.',
+    properties: {
+      variantId: {
+        type: 'string',
+        example: 'TEE-001-navy-m',
+        description:
+          'Stable identity, derived from the product SKU and the attribute values. SEND IT BACK when updating a variant: omit it and the server mints a new one, breaking any link or basket line pointing at that combination.',
+      },
+      sku: {
+        type: 'string',
+        example: 'TEE-001-1',
+        description: 'Defaults to `<productSku>-<n>`. Must be unique within the product; a repeat is refused with 400.',
+      },
+      attributes: {
+        type: 'array',
+        description: 'One entry per axis, maximum 6. THE definition of the combination.',
+        items: {
+          type: 'object',
+          required: ['name', 'value'],
+          properties: {
+            name: { type: 'string', example: 'Colour' },
+            value: { type: 'string', example: 'Navy' },
+          },
+        },
+      },
+      option: {
+        type: 'string',
+        readOnly: true,
+        example: 'Colour / Size',
+        description: 'DERIVED from the attribute names. Do not send it.',
+      },
+      value: {
+        type: 'string',
+        readOnly: true,
+        example: 'Navy \u00b7 M',
+        description: 'DERIVED from the attribute values. Do not send it. Re-derived on every save, so an edited attribute cannot leave a stale label behind.',
+      },
+      description: {
+        type: 'string',
+        maxLength: 1000,
+        description: "Copy for this combination alone, shown IN ADDITION to the product's description, not instead of it.",
+      },
+      image: { type: 'string', description: "This combination's own picture." },
+      price: {
+        type: 'number',
+        description: 'OPTIONAL. Omit when not priced \u2014 never send 0, which means free.',
+      },
+      stock: {
+        type: 'string',
+        example: '24 units',
+        description:
+          'OPTIONAL, and a STRING here while the product-level `stock` is a number. Never defaulted: a variant with no figure is absent, not zero, and is excluded from the product roll-up rather than counted as 0.',
+      },
+      status: {
+        type: 'string',
+        enum: ['In Stock', 'Low Stock', 'Out of Stock', 'Unspecified'],
+      },
+    },
+  },
   Product: {
     type: 'object',
     properties: {
@@ -200,7 +262,8 @@ const schemas: Record<string, unknown> = {
       description: { type: 'string' },
       gallery: { type: 'array', items: { type: 'object' } },
       videos: { type: 'array', items: { type: 'object' } },
-      variants: { type: 'array', items: { type: 'object' } },
+      /* Literal $ref: the `ref()` helper is declared further down this file. */
+      variants: { type: 'array', items: { $ref: '#/components/schemas/ProductVariant' } },
       createdAt: { type: 'string', format: 'date-time' },
       updatedAt: { type: 'string', format: 'date-time' },
     },
@@ -552,7 +615,7 @@ const paths: Record<string, unknown> = {
       tags: ['Products'],
       summary: 'Create a product',
       description:
-        'Requires `categoryId`; the server resolves it and derives `category`. **`price` and `stock` are both optional**, on the offering and on every variant: an offering can be created before it has been priced or counted. Do NOT send `0` for a value nobody entered — omit the field. A sent `0` is a real figure and will be treated as free, or as sold out. With variants and no base price, the listing price is the cheapest variant that has one, and the stock is the sum of the variants that carry a capacity; both stay absent when none do. Stock status derives to `Unspecified` when there is no stock figure.',
+        'Requires `categoryId`; the server resolves it and derives `category`. **`price` and `stock` are both optional**, on the offering and on every variant: an offering can be created before it has been priced or counted. Do NOT send `0` for a value nobody entered — omit the field. A sent `0` is a real figure and will be treated as free, or as sold out. With variants and no base price, the listing price is the cheapest variant that has one, and the stock is the sum of the variants that carry a capacity; both stay absent when none do. Stock status derives to `Unspecified` when there is no stock figure.\n\n**Variants:** define each one with `attributes` \u2014 one `{name, value}` per axis, max 6. `option` and `value` are DERIVED display labels and are ignored on input. `variantId` and `sku` are generated when absent; send `variantId` back on update or the combination gets a new identity. The old single-axis shape (`option` + `value`) still works and becomes a one-entry `attributes` array.',
       security: bearer,
       requestBody: jsonBody(ref('CreateProductRequest')),
       responses: {

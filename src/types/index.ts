@@ -38,9 +38,38 @@ export interface ProductGalleryItem {
   src: string;
 }
 
-export interface ProductVariant {
-  option: string;
+/** One axis of a variant, e.g. `{ name: 'Colour', value: 'Ocean Blue' }`. */
+export interface VariantAttribute {
+  name: string;
   value: string;
+}
+
+export interface ProductVariant {
+  /**
+   * Stable identity for this combination.
+   *
+   * Without one a variant cannot be linked to, put in a basket or referenced by
+   * an order. Derived from the product SKU and the attributes, so re-saving the
+   * same combination does not mint a new id.
+   */
+  variantId?: string;
+  /** This combination's own stock-keeping unit. Unique within the product. */
+  sku?: string;
+  /**
+   * The axes this combination sits on.
+   *
+   * THE source of truth for what a variant is. `option` and `value` below are a
+   * display label derived from this, kept so existing readers keep working.
+   */
+  attributes?: VariantAttribute[];
+  /** Display label for the axis names, derived. e.g. 'Colour / Storage'. */
+  option: string;
+  /** Display label for the values, derived. e.g. 'Blue · 128GB'. */
+  value: string;
+  /** Copy specific to this combination, shown in addition to the product's. */
+  description?: string;
+  /** This combination's own picture. */
+  image?: string;
   /** Optional: a variant can exist before it is priced. */
   price?: number;
   stock?: string;

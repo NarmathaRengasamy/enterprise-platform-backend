@@ -42,8 +42,20 @@ export const publicProduct = (p: Product | undefined): Record<string, any> | und
 
   if (Array.isArray(out.variants)) {
     out.variants = out.variants.map((v: any) => ({
+      /* Identity first: without it a storefront cannot deep-link to a
+         combination or put one in a basket. */
+      variantId: v.variantId ?? null,
+      sku: v.sku ?? null,
+      /* The real definition. A client should read these, not parse `value`. */
+      attributes: Array.isArray(v.attributes)
+        ? v.attributes.map((a: any) => ({ name: a.name, value: a.value }))
+        : [],
+      /* Display label, derived server-side — kept so a caller does not have to
+         join the attributes itself. */
       option: v.option,
       value: v.value,
+      ...(v.description ? { description: v.description } : {}),
+      ...(v.image ? { image: v.image } : {}),
       price: v.price ?? null,
       stock: v.stock ?? null,
       status: v.status ?? 'Unspecified',

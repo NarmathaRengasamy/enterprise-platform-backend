@@ -11,17 +11,31 @@ const log = createLogger('ProductController');
 
 const SORTABLE = ['name', 'price', 'stock', 'createdAt', 'sku'];
 
+/* More than this many axes is unusable in a picker and usually a modelling
+   mistake: Colour x Size x Material x Pack is already four. */
+const MAX_VARIANT_AXES = 6;
+
+const variantAttributeSchema = z.object({
+  name: z.string().trim().min(1, 'An attribute needs a name').max(60),
+  value: z.string().trim().min(1, 'An attribute needs a value').max(120),
+});
+
 const variantSchema = z.object({
+  variantId: z.string().trim().optional(),
+  /* The real definition of a combination. `option`/`value` are derived from it
+     when it is present, so a caller sends one or the other, not both. */
+  attributes: z.array(variantAttributeSchema).max(MAX_VARIANT_AXES).optional(),
   option: z.string().optional(),
   value: z.string().optional(),
   title: z.string().optional(),
-  sku: z.string().optional(),
+  sku: z.string().trim().optional(),
+  description: z.string().trim().max(1000, 'A variant description cannot exceed 1000 characters').optional(),
+  image: z.string().trim().optional(),
   price: z.number().min(0).optional(),
   stock: z.union([z.string(), z.number()]).optional(),
   capacity: z.number().optional(),
   capacityUnit: z.string().optional(),
   status: z.string().optional(),
-  attributes: z.array(z.any()).optional(),
   images: z.array(z.any()).optional(),
   videos: z.array(z.any()).optional(),
 });
@@ -109,6 +123,89 @@ const resolveCategory = async (categoryId: string) => {
     );
   }
   return category;
+};
+
+/* A value safe inside an id: lowercase, alphanumerics and dashes. */
+const slug = (text: string): string =>
+  String(text)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24);
+
+/**
+ * Turns whatever a caller sent into a complete, self-consistent variant.
+ *
+ * `attributes` is the truth. `option` and `value` are a DISPLAY LABEL derived
+ * from it — stored, because every existing reader expects them, but never the
+ * source: a label that is also the data cannot be filtered on, and splitting it
+ * back apart breaks the moment a value contains the separator.
+ *
+ * A caller that sends only `option`/`value` (the old shape) still works: those
+ * become a single-axis attribute, so old and new callers converge on one model.
+ */
+const normaliseVariants = (variants: any[], productSku: string): any[] => {
+  const seenSkus = new Set<string>();
+  const seenIds = new Set<string>();
+
+  return variants.map((raw: any, index: number) => {
+    const attributes: { name: string; value: string }[] = Array.isArray(raw?.attributes)
+      && raw.attributes.length
+      ? raw.attributes.map((a: any) => ({
+          name: String(a?.name ?? '').trim(),
+          value: String(a?.value ?? '').trim(),
+        }))
+      : /* Old shape, or a bare title: keep it as one axis so nothing is lost. */
+        [
+          {
+            name: String(raw?.option ?? 'Option').trim() || 'Option',
+            value: String(raw?.value ?? raw?.title ?? 'Standard').trim() || 'Standard',
+          },
+        ];
+
+    /* Derived, every time. Re-deriving on update is deliberate: an attribute
+       edited without the label being rewritten would otherwise leave the two
+       disagreeing, and the label is what a person reads. */
+    const option = attributes.map((a) => a.name).join(' / ');
+    const value = attributes.map((a) => a.value).join(' · ');
+
+    const sku = String(raw?.sku ?? '').trim() || `${productSku}-${index + 1}`;
+    if (seenSkus.has(sku)) {
+      throw new AppError(`Duplicate variant SKU "${sku}" — they must be unique within a product`, 400);
+    }
+    seenSkus.add(sku);
+
+    /* Stable: the same combination keeps its id across re-saves, so a link or a
+       basket line does not break when the product is edited. */
+    let variantId = String(raw?.variantId ?? '').trim();
+    if (!variantId) {
+      const fromAttributes = attributes.map((a) => slug(a.value)).filter(Boolean).join('-');
+      variantId = `${productSku}-${fromAttributes || index + 1}`;
+    }
+    if (seenIds.has(variantId)) variantId = `${variantId}-${index + 1}`;
+    seenIds.add(variantId);
+
+    const out: Record<string, unknown> = {
+      variantId,
+      sku,
+      attributes,
+      option,
+      value,
+      ...(raw?.price === undefined || raw?.price === null ? {} : { price: raw.price }),
+      ...(raw?.stock === undefined || raw?.stock === null || raw?.stock === ''
+        ? {}
+        : { stock: String(raw.stock) }),
+      ...(raw?.status ? { status: raw.status } : {}),
+    };
+
+    /* Empty strings are not stored: an absent description is absent, not "". */
+    const description = String(raw?.description ?? '').trim();
+    if (description) out.description = description;
+    const image = String(raw?.image ?? '').trim();
+    if (image) out.image = image;
+
+    return out;
+  });
 };
 
 /**
@@ -303,7 +400,7 @@ export const createProduct = async (
     assertPricing(body);
 
     const category = await resolveCategory(body.categoryId);
-    const variants = body.variants ?? [];
+    const variants = normaliseVariants(body.variants ?? [], String(body.sku ?? ''));
 
     /* No base price means the offering prices per variant — the listing still
        needs a figure, so the cheapest priced variant becomes it.
@@ -350,6 +447,7 @@ export const createProduct = async (
     const now = new Date().toISOString();
     const newProduct: Product = {
       ...body,
+      variants,
       id: body.sku,
       categoryId: category.id,
       category: category.name,
@@ -380,6 +478,15 @@ export const updateProduct = async (
 
     const existing = await store.getProductById(id);
     if (!existing) throw new AppError('Product not found', 404);
+
+    /* Re-normalised on update too, so an edited attribute and its display label
+       can never drift apart. */
+    if (Array.isArray(req.body.variants)) {
+      updates.variants = normaliseVariants(
+        req.body.variants,
+        String(req.body.sku ?? existing.sku ?? id)
+      );
+    }
 
     /* Re-pointing at another category carries its name across. */
     if (req.body.categoryId) {
