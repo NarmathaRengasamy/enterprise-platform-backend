@@ -324,9 +324,23 @@ export const createProduct = async (
     /* Only counts variants that actually carry a capacity. Summing with
        `|| 0` turned a matrix of blanks into a confident 0, which then derived
        as Out of Stock. */
+    /* A variant's stock arrives as a NUMBER from the form (`capacity`) and as a
+       STRING from the API (`stock: "24 units"`), which is the shape the schema
+       declares. `Number("24 units")` is NaN, so an API-created product silently
+       lost its roll-up entirely. */
+    const capacityOf = (v: any): number | undefined => {
+      const raw = v?.capacity ?? v?.stock;
+      if (raw === undefined || raw === null || raw === '') return undefined;
+      if (typeof raw === 'number') return Number.isFinite(raw) ? raw : undefined;
+      const digits = String(raw).match(/-?\d+(\.\d+)?/);
+      if (!digits) return undefined;
+      const value = Number(digits[0]);
+      return Number.isFinite(value) ? value : undefined;
+    };
+
     const countedCapacities = variants
-      .map((v: any) => Number(v.capacity ?? v.stock))
-      .filter((n: number) => Number.isFinite(n));
+      .map(capacityOf)
+      .filter((n: number | undefined): n is number => n !== undefined);
     const stock =
       body.stock ??
       (countedCapacities.length
