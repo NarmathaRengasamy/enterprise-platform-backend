@@ -2,6 +2,7 @@ import { createApp } from './app.js';
 import { config } from './config/index.js';
 import { connectDB, disconnectDB } from './config/db.js';
 import { runMigrations } from './data/migrations.js';
+import { ensureV2Indexes } from './v2/models.js';
 
 const startServer = async () => {
   // Attempt to connect to local/configured MongoDB
@@ -12,6 +13,9 @@ const startServer = async () => {
   /* Repairs unusable password hashes and backfills the categoryId foreign key.
      Both are idempotent and safe to run on every boot. */
   await runMigrations();
+
+  /* Before the first request, not after it — see `ensureV2Indexes`. */
+  await ensureV2Indexes();
 
   const app = createApp();
 

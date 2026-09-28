@@ -35,6 +35,7 @@ import {
 import { createProductSchema, updateProductSchema } from '../controllers/product.controller.js';
 import { createEventSchema, updateEventSchema } from '../controllers/schedule.controller.js';
 import { addMemberSchema, updateMemberSchema } from '../controllers/team.controller.js';
+import { v2Paths, v2Schemas, v2Tags } from './openapi.v2.js';
 
 /**
  * OpenAPI 3.0 document for the Express service.
@@ -1652,13 +1653,16 @@ export const openApiDocument = {
       description:
         'The Perfox platform connection, the knowledge-base folder it works against, cached agents and webhook endpoints (Admin). Agents and endpoints stay hidden until the connection is configured.',
     },
+    ...v2Tags,
   ],
   components: {
     securitySchemes: {
       bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
     },
-    schemas,
+    /* Catalogue v2 lives in its own module so the v1 document is untouched by
+       it; both are merged here into one served spec. */
+    schemas: { ...schemas, ...v2Schemas },
   },
   security: bearer,
-  paths,
+  paths: { ...paths, ...v2Paths },
 };

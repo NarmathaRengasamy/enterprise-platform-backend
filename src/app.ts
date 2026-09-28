@@ -6,6 +6,7 @@ import { errorHandler } from './middlewares/errorHandler.js';
 import { authenticateJWT } from './middlewares/auth.js';
 import { requestLogger } from './middlewares/requestLogger.js';
 import { isDbConnected } from './config/db.js';
+import path from 'node:path';
 import swaggerUi from 'swagger-ui-express';
 import { openApiDocument } from './docs/openapi.js';
 import { createLogger } from './utils/logger.js';
@@ -25,6 +26,8 @@ import developerRoutes from './routes/developer.routes.js';
 import operatorRoutes from './routes/operator.routes.js';
 import mcpRoutes from './routes/mcp.routes.js';
 import publicRoutes from './routes/public.routes.js';
+import catalogV2Routes from './v2/routes.js';
+import publicV2Routes from './v2/publicRoutes.js';
 
 export const createApp = (): Express => {
   const app = express();
@@ -62,6 +65,22 @@ export const createApp = (): Express => {
   if (config.nodeEnv !== 'test') {
     app.use(requestLogger);
   }
+
+  /* Uploaded product media.
+     Served before the API routes and outside them: these are public assets a
+     storefront loads with an <img> tag, which carries no token. `uploads`
+     lives next to the process, not inside `src`, so a rebuild never touches
+     it and it can be mounted as a volume. */
+  app.use(
+    '/uploads',
+    express.static(path.resolve(process.cwd(), 'uploads'), {
+      maxAge: '7d',
+      /* Falls through to the app's own 404 handler, which answers in JSON like
+         every other route. `fallthrough: false` makes serve-static raise its
+         own error instead, and that surfaced as a 500. */
+      index: false,
+    })
+  );
 
   // Health check endpoint
   app.get('/api/health', (_req: Request, res: Response) => {
@@ -118,6 +137,10 @@ export const createApp = (): Express => {
   apiRouter.use('/developer', developerRoutes);
   apiRouter.use('/operator', operatorRoutes);
 
+  /* Catalogue v2: new collections alongside v1, mounted under the same guard.
+     v1 products and categories are untouched and keep serving the current UI. */
+  apiRouter.use('/v2', catalogV2Routes);
+
   app.use('/api/v1', apiRouter);
 
   /* MCP sits OUTSIDE the API router on purpose: its caller is an AI agent on
@@ -129,6 +152,10 @@ export const createApp = (): Express => {
      API router for the same reason as MCP — its caller is a shopper on a
      website, not a member of staff with a session. */
   app.use('/public', publicRoutes);
+
+  /* The v2 storefront API, on its own path. Separate from `/public` on
+     purpose: that one is already in use and its response shape is fixed. */
+  app.use('/public/v2', publicV2Routes);
 
   // Root welcome
   app.get('/', (_req: Request, res: Response) => {
@@ -148,6 +175,8 @@ export const createApp = (): Express => {
         knowledge: '/api/v1/knowledge',
         team: '/api/v1/team',
         developer: '/api/v1/developer',
+        catalogV2: '/api/v1/v2',
+        storefront: '/public/v2',
       },
     });
   });

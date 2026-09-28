@@ -4,3 +4,7 @@ dist/
 *.log
 .DS_Store
 Documentation
+
+# Uploaded product pictures and videos. Customer data, and large — it lives
+# on a mounted volume in deployment, never in the repository.
+uploads/
