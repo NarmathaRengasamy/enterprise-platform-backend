@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { validateRequest } from '../middlewares/validate.js';
 import { queryCatalog, queryCategories } from '../services/publicCatalog.js';
+import { getPublicSiteSettings } from '../controllers/settings.controller.js';
 import { toAppError } from '../utils/error.util.js';
 import { AppError } from '../middlewares/errorHandler.js';
 import { createLogger } from '../utils/logger.js';
@@ -135,5 +136,16 @@ router.post(
     }
   }
 );
+
+/* ------------------------------------------------------------- settings */
+
+/**
+ * GET /public/settings
+ *
+ * The workspace's own name, tagline, logo and section names, for screens that
+ * render before anyone has signed in. Branding only - the controller holds
+ * back the legal name, the business category and who last saved.
+ */
+router.get('/settings', getPublicSiteSettings);
 
 export default router;

@@ -23,11 +23,27 @@ import knowledgeRoutes from './routes/knowledge.routes.js';
 import teamRoutes from './routes/team.routes.js';
 import developerRoutes from './routes/developer.routes.js';
 import operatorRoutes from './routes/operator.routes.js';
+import settingsRoutes from './routes/settings.routes.js';
 import mcpRoutes from './routes/mcp.routes.js';
 import publicRoutes from './routes/public.routes.js';
 
 export const createApp = (): Express => {
   const app = express();
+
+  /**
+   * No ETags on API responses.
+   *
+   * Express fingerprints every JSON body, so a browser that has seen a
+   * response once re-requests it conditionally and gets **304 with an empty
+   * body**. `fetch` reports 304 as not-ok, so the web client treated a
+   * perfectly good read as a failed request — and only ever on the second
+   * load of a screen, which is what made it look like a save bug rather than
+   * a read bug.
+   *
+   * Nothing here benefits from conditional caching: every payload is small,
+   * authenticated, and expected to change.
+   */
+  app.set('etag', false);
 
   // Security headers
   /* Swagger UI serves inline styles and scripts, which helmet's default CSP
@@ -117,6 +133,7 @@ export const createApp = (): Express => {
   apiRouter.use('/team', teamRoutes);
   apiRouter.use('/developer', developerRoutes);
   apiRouter.use('/operator', operatorRoutes);
+  apiRouter.use('/settings', settingsRoutes);
 
   app.use('/api/v1', apiRouter);
 
