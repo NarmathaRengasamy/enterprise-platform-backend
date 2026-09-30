@@ -55,8 +55,10 @@ export const createProductSchema = z.object({
     stock: z.number().min(0).optional(),
     stockStatus: z.enum(['In Stock', 'Low Stock', 'Out of Stock']).optional(),
     committed: z.number().optional().default(0),
-    reorderPoint: z.number().optional().default(10),
-    margin: z.string().optional().default('50.0%'),
+    /* No Zod default: the model's own defaults (0, '30%') are what has always
+       been stored, and validateRequest now applies Zod defaults. */
+    reorderPoint: z.number().optional(),
+    margin: z.string().optional(),
     discount: z.string().optional(),
     image: z.string().optional(),
     gallery: z

@@ -7,6 +7,7 @@ import { ProductModel } from '../models/Product.model.js';
 import { PlatformConnectionModel } from '../models/PlatformConnection.model.js';
 import { store } from './store.js';
 import { createLogger } from '../utils/logger.js';
+import { migrateSiteSettingsToTenantSettings } from '../services/tenantSettings.service.js';
 
 const log = createLogger('Migrations');
 
@@ -272,6 +273,22 @@ export const backfillVariantIdentity = async (): Promise<void> => {
   }
 };
 
+/**
+ * Moves the site settings into `tenant_settings`, the single settings document
+ * that now also holds the business settings. Copy-only and idempotent: the old
+ * `sitesettings` row is left untouched for rollback.
+ */
+export const moveSiteSettingsToTenantSettings = async (): Promise<void> => {
+  if (!isDbConnected()) return;
+  try {
+    const result = await migrateSiteSettingsToTenantSettings();
+    if (result === 'migrated') log.log('Site settings copied into tenant_settings');
+    else log.debug(`Site settings migration: ${result}`);
+  } catch (error) {
+    log.error(`Site settings migration failed: ${(error as Error).message}`, (error as Error).stack);
+  }
+};
+
 export const runMigrations = async (): Promise<void> => {
   await repairUnusablePasswords();
   await backfillCategoryIds();
@@ -279,4 +296,5 @@ export const runMigrations = async (): Promise<void> => {
   await backfillVariantIdentity();
   await dropPlatformKbFolder();
   await dropMockKnowledgeArticles();
+  await moveSiteSettingsToTenantSettings();
 };

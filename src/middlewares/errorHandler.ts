@@ -13,12 +13,25 @@ export class AppError extends Error {
    * never serialised to the client directly.
    */
   public details?: any;
+  /**
+   * Per-field failures for a business-rule refusal (usually a 422), keyed by the
+   * field as the client knows it (`sku`, `items.2.price`). Serialised as the same
+   * `errors: [{ path, message }]` array a Zod failure produces, so a form marks
+   * the offending inputs either way.
+   */
+  public fieldErrors?: Record<string, string>;
 
-  constructor(message: string, statusCode: number = 500, details?: any) {
+  constructor(
+    message: string,
+    statusCode: number = 500,
+    details?: any,
+    fieldErrors?: Record<string, string>
+  ) {
     super(message);
     this.statusCode = statusCode;
     this.isOperational = true;
     this.details = details;
+    this.fieldErrors = fieldErrors;
     Error.captureStackTrace(this, this.constructor);
   }
 }
@@ -46,9 +59,13 @@ export const errorHandler = (
 
   // Handle custom AppError
   if (err instanceof AppError) {
+    const errors = err.fieldErrors
+      ? Object.entries(err.fieldErrors).map(([path, message]) => ({ path, message }))
+      : undefined;
     res.status(err.statusCode).json({
       success: false,
       message: err.message,
+      ...(errors?.length ? { errors } : {}),
     });
     return;
   }

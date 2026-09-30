@@ -47,6 +47,9 @@ export const sendMessageSchema = z.object({
         image: z.string().optional(),
         fileUrl: z.string().optional(),
         fileName: z.string().optional(),
+        mimeType: z.string().optional(),
+        fileSize: z.number().optional(),
+        size: z.number().optional(),
       })
       .optional(),
   }),

@@ -13,7 +13,8 @@ export const createCategorySchema = z.object({
   body: z.object({
     id: z.string().optional(),
     name: z.string().min(1, 'Category name is required'),
-    description: z.string().optional().default('General category item'),
+    /* No Zod default: an omitted description has always been stored as ''. */
+    description: z.string().optional(),
     icon: z.string().optional().default('category'),
     color: z.string().optional().default('primary'),
   }),

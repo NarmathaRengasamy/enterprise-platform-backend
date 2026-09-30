@@ -1,0 +1,27 @@
+{
+  "code": "car_dealership",
+  "version": 2,
+  "name": { "en": "Car Dealership" },
+  "default_fulfilment": "goods",
+  "default_tracking": "serial",
+  "fields": [
+    { "key": "make", "label": { "en": "Make" }, "type": "text", "filterable": true, "required": true, "group": "vehicle" },
+    { "key": "model", "label": { "en": "Model" }, "type": "text", "filterable": true, "required": true, "group": "vehicle" },
+    {
+      "key": "body_type", "label": { "en": "Body type" }, "type": "enum", "filterable": true, "group": "vehicle",
+      "options": ["Hatchback", "Sedan", "SUV", "MUV", "Pickup"]
+    }
+  ],
+  "starter_categories": [
+    {
+      "code": "cars", "name": { "en": "Cars" },
+      "children": [
+        { "code": "suv", "name": { "en": "SUV" } },
+        { "code": "sedan", "name": { "en": "Sedan" } },
+        { "code": "hatchback", "name": { "en": "Hatchback" } }
+      ]
+    },
+    { "code": "accessories", "name": { "en": "Accessories" }, "tracking": "none" },
+    { "code": "service", "name": { "en": "Service" }, "fulfilment": "service", "tracking": "none" }
+  ]
+}

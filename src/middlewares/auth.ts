@@ -4,44 +4,57 @@ import { config } from '../config/index.js';
 import { AuthTokenPayload, Role } from '../types/index.js';
 import { AppError } from './errorHandler.js';
 import { store } from '../data/store.js';
+import { runWithRequestContext } from '../utils/request-context.js';
 
 export interface AuthenticatedRequest extends Request {
   user?: AuthTokenPayload;
 }
 
-export const authenticateJWT = (
+/**
+ * Async because the user lookup is. `getUserById` returns a Promise, and a
+ * Promise is always truthy — without the await, the token of a deleted user
+ * kept working until it expired.
+ *
+ * Express 4 does not catch a rejected promise from a handler, so every failure
+ * goes through `next` rather than being thrown. `next()` itself is called
+ * outside the try: inside it, any synchronous error from a later handler was
+ * caught here and misreported as "Invalid authentication token".
+ */
+export const authenticateJWT = async (
   req: AuthenticatedRequest,
   _res: Response,
   next: NextFunction
-): void => {
+): Promise<void> => {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    throw new AppError('Authentication token required', 401);
+    return next(new AppError('Authentication token required', 401));
   }
 
   const token = authHeader.split(' ')[1];
 
+  let decoded: AuthTokenPayload;
   try {
-    const decoded = jwt.verify(token, config.jwtSecret) as AuthTokenPayload;
-    
-    // Check if user still exists
-    const user = store.getUserById(decoded.userId);
+    decoded = jwt.verify(token, config.jwtSecret) as AuthTokenPayload;
+
+    const user = await store.getUserById(decoded.userId);
     if (!user) {
       throw new AppError('User belonging to this token no longer exists', 401);
     }
-
-    req.user = decoded;
-    next();
   } catch (err: any) {
     if (err instanceof AppError) {
-      next(err);
-    } else if (err.name === 'TokenExpiredError') {
-      next(new AppError('Token has expired, please log in again', 401));
-    } else {
-      next(new AppError('Invalid authentication token', 401));
+      return next(err);
     }
+    if (err?.name === 'TokenExpiredError') {
+      return next(new AppError('Token has expired, please log in again', 401));
+    }
+    return next(new AppError('Invalid authentication token', 401));
   }
+
+  req.user = decoded;
+  /* Everything downstream of this call — controllers, services, Mongoose hooks
+     — can read who is acting, which is what fills created_by / updated_by. */
+  runWithRequestContext({ user_id: decoded.userId, role: decoded.role }, () => next());
 };
 
 export const requireRoles = (...allowedRoles: Role[]) => {
