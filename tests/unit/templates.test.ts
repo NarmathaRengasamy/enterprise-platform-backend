@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { optionValue, templatesService, toFieldDefinition } from '../../src/services/templates.service.js';
+import { optionValue, templatesService, toFieldDefinition, validateTemplate } from '../../src/services/templates.service.js';
 import { keyFromLabel, similarOption } from '../../src/services/productType.service.js';
 
 describe('templates (Phase 1b: basic fields only)', () => {
@@ -36,6 +36,33 @@ describe('templates (Phase 1b: basic fields only)', () => {
         });
       walk(t.starter_categories);
     }
+  });
+
+  it('starter categories set no fulfilment or tracking (R13, Phase 2b)', () => {
+    for (const t of templatesService.list()) {
+      const walk = (cats: any[]): void =>
+        cats.forEach((c) => {
+          expect(c).not.toHaveProperty('fulfilment');
+          expect(c).not.toHaveProperty('tracking');
+          walk(c.children ?? []);
+        });
+      walk(t.starter_categories);
+    }
+    const car = templatesService.get('car_dealership')!;
+    expect(car.starter_categories.map((c) => c.code)).toEqual(['cars', 'accessories', 'service']);
+    expect(car).toMatchObject({ default_fulfilment: 'goods', default_tracking: 'serial' }); // the product defaults stay
+  });
+
+  it('refuses at load a starter category that sets fulfilment or tracking, even nested', () => {
+    const car = templatesService.get('car_dealership')!;
+    const withCats = (starter_categories: any[]) => ({ ...car, starter_categories }) as any;
+    expect(() => validateTemplate(withCats([{ code: 'service', name: { en: 'Service' }, fulfilment: 'service' }]))).toThrow(
+      /starter category "service": categories do not set fulfilment or tracking/
+    );
+    expect(() =>
+      validateTemplate(withCats([{ code: 'cars', name: { en: 'Cars' }, children: [{ code: 'suv', name: { en: 'SUV' }, tracking: 'serial' }] }]))
+    ).toThrow(/starter category "suv"/);
+    expect(() => validateTemplate(car)).not.toThrow();
   });
 
   it('turns options into stable values', () => {

@@ -192,6 +192,7 @@ describe('PUT /settings/business — permissions', () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual({
       business_category: null,
+      category_mode: 'flat', // Phase 2: flat by default
       active_product_type_id: null,
       timezone: 'Asia/Kolkata',
       default_currency: 'INR',

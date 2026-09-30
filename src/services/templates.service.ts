@@ -7,6 +7,7 @@ import {
   FieldDefinition,
   FieldOption,
   FULFILMENTS,
+  StarterCategory,
   TemplateField,
   TRACKINGS,
 } from '../types/productType.types.js';
@@ -30,7 +31,7 @@ export const optionValue = (label: string): string =>
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
 
-const validateTemplate = (t: BusinessTemplate): void => {
+export const validateTemplate = (t: BusinessTemplate): void => {
   const where = `template "${t.code}"`;
   if (!KEY_PATTERN.test(t.code)) throw new Error(`${where}: invalid code`);
   if (!Number.isInteger(t.version) || t.version < 1) throw new Error(`${where}: version must be an integer ≥ 1`);
@@ -55,6 +56,18 @@ const validateTemplate = (t: BusinessTemplate): void => {
     const values = (f.options ?? []).map(optionValue);
     if (new Set(values).size !== values.length) throw new Error(`${at}: duplicate options`);
   }
+
+  /* R13: categories no longer set fulfilment or tracking — those belong to the
+     product (Phase 3), pre-filled from the type's defaults above. */
+  const walk = (cats: StarterCategory[]): void =>
+    cats.forEach((c) => {
+      const extra = c as StarterCategory & { fulfilment?: unknown; tracking?: unknown };
+      if (extra.fulfilment !== undefined || extra.tracking !== undefined) {
+        throw new Error(`${where}, starter category "${c.code}": categories do not set fulfilment or tracking`);
+      }
+      walk(c.children ?? []);
+    });
+  walk(t.starter_categories ?? []);
 };
 
 const ALL = [ecommerce, carDealership, general] as unknown as BusinessTemplate[];

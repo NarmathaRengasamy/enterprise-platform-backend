@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { templatesService } from '../services/templates.service.js';
 import { tenantSettingsService } from '../services/tenantSettings.service.js';
 import { productTypeService, toResponse } from '../services/productType.service.js';
+import { catalogCategoryService } from '../services/catalogCategory.service.js';
 import { FIELD_TYPES, LANGUAGES } from '../types/productType.types.js';
 import { ok } from '../utils/response.util.js';
 import { toAppError } from '../utils/error.util.js';
@@ -68,8 +69,10 @@ export const updateBusinessSchema = z.object({
       .refine((l) => l.includes('en'), 'English (en) is always required')
       .refine((l) => new Set(l).size === l.length, 'Each language only once')
       .optional(),
-    /* Recorded now, applied when categories arrive in Phase 2. */
+    /* Creates the template's starter categories (flattened in flat mode). */
     create_starter_categories: z.boolean().optional(),
+    /* Flat by default; "tree" switches the category tree on (R11, R11a). */
+    category_mode: z.enum(['flat', 'tree']).optional(),
   }),
 });
 
@@ -127,6 +130,7 @@ const businessView = (doc: any) => {
   const j = doc.toJSON();
   return {
     business_category: j.business_category ?? null,
+    category_mode: j.category_mode ?? 'flat',
     active_product_type_id: j.active_product_type_id ?? null,
     timezone: j.timezone,
     default_currency: j.default_currency,
@@ -173,10 +177,33 @@ export const getBusinessSettings = handle('Could not read the business settings'
 });
 
 export const updateBusinessSettings = handle('Could not save the business settings', async (req, res) => {
-  const { settings, product_type, outcome, notice } = await productTypeService.setBusinessCategory(req.body);
+  /* Check the mode switch before saving anything, so a refused switch
+     (tree → flat with sub-categories) leaves every setting unchanged. */
+  if (req.body.category_mode) await catalogCategoryService.assertCanSetMode(req.body.category_mode);
+
+  let { settings, product_type, outcome, notice } = await productTypeService.setBusinessCategory(req.body);
+  if (req.body.category_mode && req.body.category_mode !== settings.category_mode) {
+    await catalogCategoryService.setCategoryMode(req.body.category_mode);
+    settings = await tenantSettingsService.get();
+  }
+
+  /* Phase 2: the "Create starter categories" option. Codes that already exist
+     are skipped, so saving again never duplicates them. */
+  let starter_categories: { created: string[]; skipped: string[] } | undefined;
+  if (req.body.create_starter_categories) {
+    const template = templatesService.get(req.body.business_category);
+    if (template) starter_categories = await catalogCategoryService.createStarterCategories(template);
+  }
+
   res.json(
     ok(
-      { settings: businessView(settings), product_type: toResponse(product_type), outcome, ...(notice ? { notice } : {}) },
+      {
+        settings: businessView(settings),
+        product_type: toResponse(product_type),
+        outcome,
+        ...(notice ? { notice } : {}),
+        ...(starter_categories ? { starter_categories } : {}),
+      },
       notice ?? 'Business settings saved'
     )
   );

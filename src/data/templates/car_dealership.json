@@ -21,7 +21,7 @@
         { "code": "hatchback", "name": { "en": "Hatchback" } }
       ]
     },
-    { "code": "accessories", "name": { "en": "Accessories" }, "tracking": "none" },
-    { "code": "service", "name": { "en": "Service" }, "fulfilment": "service", "tracking": "none" }
+    { "code": "accessories", "name": { "en": "Accessories" } },
+    { "code": "service", "name": { "en": "Service" } }
   ]
 }

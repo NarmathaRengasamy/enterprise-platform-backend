@@ -64,8 +64,6 @@ export interface TemplateField {
 export interface StarterCategory {
   code: string;
   name: Translated;
-  fulfilment?: Fulfilment;
-  tracking?: Tracking;
   visible_field_keys?: string[];
   children?: StarterCategory[];
 }

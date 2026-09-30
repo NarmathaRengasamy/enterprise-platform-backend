@@ -28,6 +28,7 @@ import mcpRoutes from './routes/mcp.routes.js';
 import publicRoutes from './routes/public.routes.js';
 import mediaRoutes from './routes/media.routes.js';
 import productTypeRoutes from './routes/productType.routes.js';
+import catalogCategoryRoutes from './routes/catalogCategory.routes.js';
 import { listBusinessTemplates } from './controllers/business.controller.js';
 import { UPLOADS_ROOT, UPLOADS_URL_PREFIX } from './controllers/media.controller.js';
 
@@ -141,6 +142,8 @@ export const createApp = (): Express => {
   apiRouter.use('/media', mediaRoutes);
   apiRouter.get('/business-templates', listBusinessTemplates);
   apiRouter.use('/product-type', productTypeRoutes);
+  /* The new category tree. The old flat /categories stays until the cut-over. */
+  apiRouter.use('/catalog-categories', catalogCategoryRoutes);
 
   app.use('/api/v1', apiRouter);
 

@@ -41,6 +41,8 @@ const TenantSettingsSchema = new Schema({
 
   /* ---- Business settings (new) ---- */
   business_category: { type: String, default: null },
+  /* Flat by default; the Admin can switch the category tree on (R11). */
+  category_mode: { type: String, enum: ['flat', 'tree'], default: 'flat' },
   active_product_type_id: { type: String, default: null },
   timezone: { type: String, default: 'Asia/Kolkata' },
   default_currency: { type: String, default: 'INR' },
