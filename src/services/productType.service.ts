@@ -5,6 +5,7 @@ import { softDelete } from '../utils/soft-delete.util.js';
 import { createLogger } from '../utils/logger.js';
 import { tenantSettingsService } from './tenantSettings.service.js';
 import { KEY_PATTERN, optionValue, templatesService, toFieldDefinition } from './templates.service.js';
+import { normaliseUnit, UNITS, UnitFamily, unitsOf } from '../utils/units.util.js';
 import {
   BusinessTemplate,
   FieldDefinition,
@@ -23,7 +24,7 @@ const log = createLogger('ProductType');
 /* Collections that arrive in Phase 3. Until then they do not exist, every count
    is 0, and the "products exist" rules (K1, K3, R5) simply never trigger. */
 const PRODUCTS_COLLECTION = 'products_v2';
-const ITEMS_COLLECTION = 'catalog_items';
+const ITEMS_COLLECTION = 'product_items';
 
 const liveCount = async (collection: string, filter: Record<string, unknown> = {}): Promise<number> => {
   const db = mongoose.connection.db;
@@ -35,8 +36,12 @@ export const countLiveProducts = (): Promise<number> => liveCount(PRODUCTS_COLLE
 
 /** True if any live product or item holds a value for this field. */
 export const isFieldUsed = async (key: string): Promise<boolean> =>
-  (await liveCount(PRODUCTS_COLLECTION, { 'attributes.key': key })) > 0 ||
+  (await liveCount(PRODUCTS_COLLECTION, { $or: [{ 'attributes.key': key }, { 'variant_axes.key': key }] })) > 0 ||
   (await liveCount(ITEMS_COLLECTION, { 'attributes.key': key })) > 0;
+
+/** True if a live product builds its variants from this field (R45: its unit family is then fixed). */
+export const isVariantAxis = async (key: string): Promise<boolean> =>
+  (await liveCount(PRODUCTS_COLLECTION, { 'variant_axes.key': key })) > 0;
 
 /** "Warranty (months)" → "warranty_months". */
 export const keyFromLabel = (label: string): string => {
@@ -99,7 +104,21 @@ const buildOptions = (input: OptionInput[]): FieldOption[] => {
 /** Shape rules every field must satisfy, template or custom. */
 const assertFieldShape = (f: FieldDefinition, isNewCustom: boolean) => {
   if (!f.label.en) throw invalid('An attribute needs a name', 'label.en');
-  if (f.variant_forming && f.type !== 'enum') throw invalid('Only enum fields can form variants', 'variant_forming');
+  if (f.unit_family && f.type !== 'number') throw invalid('A unit family is only for number fields', 'unit_family');
+  /* R45: a choice list, or a number with a unit family (measured sizes). */
+  if (f.variant_forming && f.type !== 'enum' && !(f.type === 'number' && f.unit_family)) {
+    throw invalid(
+      f.type === 'number' ? 'A number field can form variants only with a unit family (weight, volume, length or count)' : 'Only enum fields, or number fields with a unit family, can form variants',
+      'variant_forming'
+    );
+  }
+  /* A unit, when set, must belong to the family: kg on a volume field is refused. */
+  if (f.unit_family && f.unit) {
+    const u = normaliseUnit(f.unit);
+    if (!u || UNITS[u].family !== f.unit_family) {
+      throw invalid(`The unit must be one of ${unitsOf(f.unit_family).join(', ')} for a ${f.unit_family} field`, 'unit');
+    }
+  }
   if (f.type !== 'enum' && f.options.length) throw invalid('Options are only for enum fields', 'options');
   if (f.unit && f.type !== 'number') throw invalid('A unit is only for number fields', 'unit');
   if ((f.min !== undefined || f.max !== undefined) && f.type !== 'number')
@@ -304,6 +323,7 @@ export const productTypeService = {
     key?: string;
     type: FieldType;
     unit?: string;
+    unit_family?: UnitFamily;
     min?: number;
     max?: number;
     options?: OptionInput[];
@@ -334,7 +354,8 @@ export const productTypeService = {
       key,
       label: cleanTranslated(input.label),
       type: input.type,
-      ...(input.unit?.trim() ? { unit: input.unit.trim() } : {}),
+      ...(input.unit?.trim() ? { unit: input.unit_family ? normaliseUnit(input.unit) ?? input.unit.trim() : input.unit.trim() } : {}),
+      ...(input.unit_family ? { unit_family: input.unit_family } : {}),
       ...(input.min !== undefined ? { min: input.min } : {}),
       ...(input.max !== undefined ? { max: input.max } : {}),
       options: buildOptions(input.options ?? []),
@@ -362,6 +383,7 @@ export const productTypeService = {
       type?: FieldType;
       label?: Translated;
       unit?: string | null;
+      unit_family?: UnitFamily | null;
       min?: number | null;
       max?: number | null;
       options?: OptionInput[];
@@ -396,8 +418,24 @@ export const productTypeService = {
       }
       if (field.type !== 'number') {
         delete field.unit;
+        delete field.unit_family;
         delete field.min;
         delete field.max;
+      }
+    }
+
+    /* R45: the unit family adds a use (measured sizes) without changing what
+       stored values mean, so it may be set on a template or used field — but not
+       changed while a product builds its variants from the field. */
+    const usedAsAxis = await isVariantAxis(key);
+    if (patch.unit_family !== undefined && (patch.unit_family ?? null) !== (field.unit_family ?? null)) {
+      if (usedAsAxis) throw conflict('Products build their variants from this attribute, so its unit family cannot be changed');
+      if (patch.unit_family === null) {
+        delete field.unit_family;
+        /* Without a family a number can no longer form variants. */
+        if (field.type === 'number') field.variant_forming = false;
+      } else {
+        field.unit_family = patch.unit_family;
       }
     }
 
@@ -414,7 +452,12 @@ export const productTypeService = {
     }
 
     if (patch.variant_forming !== undefined && patch.variant_forming !== field.variant_forming) {
-      if (locked) throw conflict(`Whether it forms variants cannot be changed ${lockedWhy}`);
+      /* A measured size may be switched on or off for variants on any number field
+         with a unit family, unless products already build variants from it. */
+      const measured = field.type === 'number' && Boolean(field.unit_family);
+      if (measured ? usedAsAxis : locked) {
+        throw conflict(measured ? 'Products build their variants from this attribute, so this cannot be changed' : `Whether it forms variants cannot be changed ${lockedWhy}`);
+      }
       field.variant_forming = patch.variant_forming;
     }
 

@@ -1,6 +1,7 @@
 import mongoose, { Schema } from 'mongoose';
 import { basePlugin } from './plugins/base.plugin.js';
 import { FIELD_TYPES, FULFILMENTS, TRACKINGS } from '../types/productType.types.js';
+import { UNIT_FAMILIES } from '../utils/units.util.js';
 
 /**
  * The tenant's product type (design §6.2 `product_types`).
@@ -31,6 +32,8 @@ const FieldSchema = new Schema(
     label: { type: TranslatedSchema, required: true },
     type: { type: String, enum: FIELD_TYPES, required: true },
     unit: { type: String },
+    /* Number fields only: makes it usable as a measured-size variant option (R45). */
+    unit_family: { type: String, enum: UNIT_FAMILIES },
     min: { type: Number },
     max: { type: Number },
     options: { type: [OptionSchema], default: [] },

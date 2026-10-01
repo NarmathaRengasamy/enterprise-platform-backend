@@ -33,6 +33,8 @@ export interface FieldDefinition {
   label: Translated;
   type: FieldType;
   unit?: string;
+  /** weight · volume · length · count — number fields only (R45). */
+  unit_family?: 'weight' | 'volume' | 'length' | 'count';
   min?: number;
   max?: number;
   options: FieldOption[];

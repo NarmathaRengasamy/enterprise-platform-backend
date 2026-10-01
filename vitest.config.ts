@@ -18,6 +18,9 @@ export default defineConfig({
     /* Each file gets its own process: tests set env vars (UPLOADS_DIR) before
        importing the app, and module state must not leak between files. */
     pool: 'forks',
+    /* Most files start their own mongod (one a replica set); too many at once
+       and a start-up misses mongodb-memory-server's 10 s launch limit. */
+    poolOptions: { forks: { minForks: 1, maxForks: 4 } },
     env: {
       NODE_ENV: 'test',
       ...(systemBinary ? { MONGOMS_SYSTEM_BINARY: systemBinary } : {}),

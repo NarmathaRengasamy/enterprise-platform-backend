@@ -13,6 +13,7 @@ const log = createLogger('CatalogCategoryController');
  *
  *   GET    /catalog-categories?tree=true&include_deleted=   any signed-in user
  *   GET    /catalog-categories/export?search=&status=&include_deleted=  Admin, Editor (CSV)
+ *   GET    /catalog-categories/stats                        any signed-in user (KPI cards)
  *   GET    /catalog-categories/:id                          any signed-in user
  *   POST   /catalog-categories                              Admin, Editor
  *   PATCH  /catalog-categories/:id                          Admin, Editor
@@ -94,6 +95,11 @@ export const exportCategories = handle('Could not export the categories', async 
   res.setHeader('Content-Disposition', 'attachment; filename="categories.csv"');
   /* BOM so Excel reads the Tamil / Hindi names as UTF-8. */
   res.status(200).send(`\uFEFF${csv}`);
+});
+
+export const categoryStats = handle('Could not load the category figures', async (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json(ok(await catalogCategoryService.stats()));
 });
 
 export const getCategory = handle('Could not load the category', async (req, res) => {

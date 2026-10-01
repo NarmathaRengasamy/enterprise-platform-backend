@@ -29,6 +29,7 @@ import publicRoutes from './routes/public.routes.js';
 import mediaRoutes from './routes/media.routes.js';
 import productTypeRoutes from './routes/productType.routes.js';
 import catalogCategoryRoutes from './routes/catalogCategory.routes.js';
+import productV2Routes from './routes/productV2.routes.js';
 import { listBusinessTemplates } from './controllers/business.controller.js';
 import { UPLOADS_ROOT, UPLOADS_URL_PREFIX } from './controllers/media.controller.js';
 
@@ -146,6 +147,13 @@ export const createApp = (): Express => {
   apiRouter.use('/catalog-categories', catalogCategoryRoutes);
 
   app.use('/api/v1', apiRouter);
+
+  /* API v2 — the new product module's products, beside /api/v1/products until
+     the Phase 5 cut-over. Signed-in users only, like v1. */
+  const apiV2Router = express.Router();
+  apiV2Router.use(authenticateJWT);
+  apiV2Router.use('/products', productV2Routes);
+  app.use('/api/v2', apiV2Router);
 
   /* Uploaded product images and videos. Public and read-only, like the files on
      any storefront. helmet sets Cross-Origin-Resource-Policy: same-origin, which

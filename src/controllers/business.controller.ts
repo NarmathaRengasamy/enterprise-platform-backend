@@ -5,6 +5,7 @@ import { tenantSettingsService } from '../services/tenantSettings.service.js';
 import { productTypeService, toResponse } from '../services/productType.service.js';
 import { catalogCategoryService } from '../services/catalogCategory.service.js';
 import { FIELD_TYPES, LANGUAGES } from '../types/productType.types.js';
+import { UNIT_FAMILIES } from '../utils/units.util.js';
 import { ok } from '../utils/response.util.js';
 import { toAppError } from '../utils/error.util.js';
 import { createLogger } from '../utils/logger.js';
@@ -82,6 +83,8 @@ export const addFieldSchema = z.object({
     key: z.string().trim().max(60).optional(),
     type: z.enum(FIELD_TYPES),
     unit: z.string().trim().max(20).optional(),
+    /* Number fields only (R45); the service checks the unit belongs to it. */
+    unit_family: z.enum(UNIT_FAMILIES).optional(),
     min: z.number().finite().optional(),
     max: z.number().finite().optional(),
     options: z.array(optionInput).max(500).optional(),
@@ -100,6 +103,7 @@ export const updateFieldSchema = z.object({
     type: z.enum(FIELD_TYPES).optional(),
     label: translated.optional(),
     unit: z.string().trim().max(20).nullable().optional(),
+    unit_family: z.enum(UNIT_FAMILIES).nullable().optional(),
     min: z.number().finite().nullable().optional(),
     max: z.number().finite().nullable().optional(),
     options: z.array(optionInput).max(500).optional(),

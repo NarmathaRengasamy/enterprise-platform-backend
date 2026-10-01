@@ -153,6 +153,17 @@ const nextSortOrder = async (parent_id: string | null) => {
   return (last?.sort_order ?? 0) + 1;
 };
 
+/** Live products per category id (a product in several categories counts in each). */
+const productCountsByCategory = async (): Promise<Map<string, number>> => {
+  const db = mongoose.connection.db;
+  if (!db) return new Map();
+  const rows = await db
+    .collection(PRODUCTS_COLLECTION)
+    .aggregate<{ _id: string; n: number }>([{ $match: { is_deleted: false } }, { $unwind: '$category_ids' }, { $group: { _id: '$category_ids', n: { $sum: 1 } } }])
+    .toArray();
+  return new Map(rows.map((r) => [r._id, r.n]));
+};
+
 const liveProductCount = async (categoryId: string) => {
   const db = mongoose.connection.db;
   if (!db) return 0;
@@ -236,7 +247,10 @@ export const catalogCategoryService = {
     const byId = new Map(liveRows.map((r) => [r.id, r]));
     const defaults = await typeDefaults();
 
-    const nodes = new Map(rows.map((r) => [r.id, { ...view(r, byId, defaults), children: [] as any[] }]));
+    const counts = await productCountsByCategory();
+    const nodes = new Map(
+      rows.map((r) => [r.id, { ...view(r, byId, defaults), product_count: counts.get(r.id) ?? 0, children: [] as any[] }])
+    );
     const roots: any[] = [];
     for (const r of rows) {
       const node = nodes.get(r.id)!;
@@ -288,6 +302,37 @@ export const catalogCategoryService = {
         .join(',')
     );
     return { csv: [EXPORT_COLUMNS.join(','), ...lines].join('\r\n'), count: rows.length };
+  },
+
+  /**
+   * The category screen's KPI cards, from the new products (products_v2):
+   * live categories; live items of live products filed in any category;
+   * the category with the most products (share of categorised products);
+   * and products per category on average.
+   */
+  async stats() {
+    const db = mongoose.connection.db;
+    const live = await allLive();
+    const counts = await productCountsByCategory();
+    const liveCounts = live.map((c) => ({ c, n: counts.get(c.id) ?? 0 }));
+    const categorised = db
+      ? await db.collection(PRODUCTS_COLLECTION).find({ is_deleted: false, 'category_ids.0': { $exists: true } }, { projection: { id: 1 } }).toArray()
+      : [];
+    const assigned_skus = db && categorised.length
+      ? await db.collection('product_items').countDocuments({ is_deleted: false, product_id: { $in: categorised.map((p) => p.id) } })
+      : 0;
+    const top = liveCounts.sort((a, b) => b.n - a.n)[0];
+    const assignments = liveCounts.reduce((sum, x) => sum + x.n, 0);
+    return {
+      total_categories: live.length,
+      assigned_skus,
+      categorised_products: categorised.length,
+      top_distribution:
+        top && top.n
+          ? { id: top.c.id, code: top.c.code, name: top.c.name, count: top.n, percentage: Math.round((top.n / categorised.length) * 100) }
+          : null,
+      average_per_category: live.length ? Math.round((assignments / live.length) * 10) / 10 : 0,
+    };
   },
 
   async get(id: string) {

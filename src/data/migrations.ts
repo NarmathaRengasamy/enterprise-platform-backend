@@ -6,6 +6,9 @@ import { AIAgentModel } from '../models/Agent.model.js';
 import { ProductModel } from '../models/Product.model.js';
 import { PlatformConnectionModel } from '../models/PlatformConnection.model.js';
 import { CatalogCategoryModel } from '../models/CatalogCategory.model.js';
+import { ProductV2Model } from '../models/ProductV2.model.js';
+import { ProductItemModel } from '../models/ProductItem.model.js';
+import { ItemStockModel } from '../models/ItemStock.model.js';
 import { store } from './store.js';
 import { createLogger } from '../utils/logger.js';
 import { migrateSiteSettingsToTenantSettings } from '../services/tenantSettings.service.js';
@@ -325,6 +328,24 @@ export const dropCategoryOverrides = async (): Promise<number> => {
   }
 };
 
+/**
+ * Builds the product module's indexes before the server takes traffic.
+ *
+ * Mongoose builds indexes in the background after connecting, so on a fresh
+ * database the first search could arrive before the text index exists
+ * ("text index required for $text query"). `init()` resolves once they are
+ * built. Idempotent: existing indexes are left as they are.
+ */
+export const ensureProductModuleIndexes = async (): Promise<void> => {
+  if (!isDbConnected()) return;
+  try {
+    await Promise.all([CatalogCategoryModel, ProductV2Model, ProductItemModel, ItemStockModel].map((m: any) => m.init()));
+    log.debug('Product module indexes are in place');
+  } catch (error) {
+    log.error(`Building the product module indexes failed: ${(error as Error).message}`);
+  }
+};
+
 export const runMigrations = async (): Promise<void> => {
   await repairUnusablePasswords();
   await backfillCategoryIds();
@@ -334,4 +355,5 @@ export const runMigrations = async (): Promise<void> => {
   await dropMockKnowledgeArticles();
   await moveSiteSettingsToTenantSettings();
   await dropCategoryOverrides();
+  await ensureProductModuleIndexes();
 };

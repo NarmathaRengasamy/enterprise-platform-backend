@@ -3,6 +3,7 @@ import {
   createCategory,
   createCategorySchema,
   deleteCategory,
+  categoryStats,
   exportCategories,
   exportSchema,
   getCategory,
@@ -21,6 +22,7 @@ const router = Router();
 router.get('/', listCategories);
 /* Before '/:id' so "export" and "reorder" are not read as ids. */
 router.get('/export', requireRoles('Admin', 'Editor'), validateRequest(exportSchema), exportCategories);
+router.get('/stats', categoryStats);
 router.post('/reorder', requireRoles('Admin', 'Editor'), validateRequest(reorderSchema), reorderCategories);
 router.get('/:id', getCategory);
 router.post('/', requireRoles('Admin', 'Editor'), validateRequest(createCategorySchema), createCategory);
