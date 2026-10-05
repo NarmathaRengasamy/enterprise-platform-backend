@@ -1,0 +1,25 @@
+{
+  "code": "ecommerce",
+  "version": 2,
+  "name": { "en": "E-commerce (general retail)" },
+  "default_fulfilment": "goods",
+  "default_tracking": "none",
+  "fields": [
+    { "key": "brand", "label": { "en": "Brand" }, "type": "text", "filterable": true, "group": "general" },
+    {
+      "key": "material", "label": { "en": "Material" }, "type": "enum", "filterable": true, "group": "general",
+      "options": ["Cotton", "Polyester", "Leather", "Wool", "Silk", "Denim", "Linen"]
+    },
+    {
+      "key": "gender", "label": { "en": "Gender" }, "type": "enum", "filterable": true, "group": "general",
+      "options": ["Men", "Women", "Unisex", "Kids"]
+    }
+  ],
+  "starter_categories": [
+    { "code": "men", "name": { "en": "Men" } },
+    { "code": "women", "name": { "en": "Women" } },
+    { "code": "kids", "name": { "en": "Kids" } },
+    { "code": "accessories", "name": { "en": "Accessories" } },
+    { "code": "home", "name": { "en": "Home" } }
+  ]
+}

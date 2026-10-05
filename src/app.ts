@@ -26,6 +26,13 @@ import operatorRoutes from './routes/operator.routes.js';
 import settingsRoutes from './routes/settings.routes.js';
 import mcpRoutes from './routes/mcp.routes.js';
 import publicRoutes from './routes/public.routes.js';
+import mediaRoutes from './routes/media.routes.js';
+import productTypeRoutes from './routes/productType.routes.js';
+import catalogCategoryRoutes from './routes/catalogCategory.routes.js';
+import productV2Routes from './routes/productV2.routes.js';
+import stockRoutes from './routes/stock.routes.js';
+import { listBusinessTemplates } from './controllers/business.controller.js';
+import { UPLOADS_ROOT, UPLOADS_URL_PREFIX } from './controllers/media.controller.js';
 
 export const createApp = (): Express => {
   const app = express();
@@ -134,8 +141,38 @@ export const createApp = (): Express => {
   apiRouter.use('/developer', developerRoutes);
   apiRouter.use('/operator', operatorRoutes);
   apiRouter.use('/settings', settingsRoutes);
+  apiRouter.use('/media', mediaRoutes);
+  apiRouter.get('/business-templates', listBusinessTemplates);
+  apiRouter.use('/product-type', productTypeRoutes);
+  /* The new category tree. The old flat /categories stays until the cut-over. */
+  apiRouter.use('/catalog-categories', catalogCategoryRoutes);
 
   app.use('/api/v1', apiRouter);
+
+  /* API v2 — the new product module's products, beside /api/v1/products until
+     the Phase 5 cut-over. Signed-in users only, like v1. */
+  const apiV2Router = express.Router();
+  apiV2Router.use(authenticateJWT);
+  apiV2Router.use('/products', productV2Routes);
+  /* Phase 4: /items/:id/stock…, /items/:id/units, /units/:id, /items/:id/bundle-components */
+  apiV2Router.use('/', stockRoutes);
+  app.use('/api/v2', apiV2Router);
+
+  /* Uploaded product images and videos. Public and read-only, like the files on
+     any storefront. helmet sets Cross-Origin-Resource-Policy: same-origin, which
+     would stop the web app (a different origin in development) from showing
+     them, so it is relaxed for this path only. Names are server-generated UUIDs;
+     nosniff stops a browser reinterpreting a file as something else. */
+  app.use(
+    UPLOADS_URL_PREFIX,
+    (_req: Request, res: Response, next) => {
+      res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      next();
+    },
+    /* A missing file falls through to the 404 handler below. */
+    express.static(UPLOADS_ROOT, { index: false, dotfiles: 'deny' })
+  );
 
   /* MCP sits OUTSIDE the API router on purpose: its caller is an AI agent on
      the Perfox platform, not a signed-in member of staff, so it carries a

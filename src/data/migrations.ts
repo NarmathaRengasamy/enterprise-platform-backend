@@ -5,8 +5,17 @@ import { UserModel } from '../models/User.model.js';
 import { AIAgentModel } from '../models/Agent.model.js';
 import { ProductModel } from '../models/Product.model.js';
 import { PlatformConnectionModel } from '../models/PlatformConnection.model.js';
+import { CatalogCategoryModel } from '../models/CatalogCategory.model.js';
+import { ProductV2Model } from '../models/ProductV2.model.js';
+import { ProductItemModel } from '../models/ProductItem.model.js';
+import { ItemStockModel } from '../models/ItemStock.model.js';
+import { StockMovementModel } from '../models/StockMovement.model.js';
+import { ItemUnitModel } from '../models/ItemUnit.model.js';
+import { BundleComponentModel } from '../models/BundleComponent.model.js';
+import { writeOpeningBalances } from '../services/stock.service.js';
 import { store } from './store.js';
 import { createLogger } from '../utils/logger.js';
+import { migrateSiteSettingsToTenantSettings } from '../services/tenantSettings.service.js';
 
 const log = createLogger('Migrations');
 
@@ -272,6 +281,94 @@ export const backfillVariantIdentity = async (): Promise<void> => {
   }
 };
 
+/**
+ * Moves the site settings into `tenant_settings`, the single settings document
+ * that now also holds the business settings. Copy-only and idempotent: the old
+ * `sitesettings` row is left untouched for rollback.
+ */
+export const moveSiteSettingsToTenantSettings = async (): Promise<void> => {
+  if (!isDbConnected()) return;
+  try {
+    const result = await migrateSiteSettingsToTenantSettings();
+    if (result === 'migrated') log.log('Site settings copied into tenant_settings');
+    else log.debug(`Site settings migration: ${result}`);
+  } catch (error) {
+    log.error(`Site settings migration failed: ${(error as Error).message}`, (error as Error).stack);
+  }
+};
+
+/* Phase 2b (R13): categories no longer set these — they are product settings. */
+const RETIRED_CATEGORY_FIELDS = ['fulfilment', 'tracking'];
+
+/**
+ * Removes fulfilment / tracking from the new categories (`categories_v2`).
+ *
+ * Works on the raw collection, so the audit hook does not restamp
+ * `updated_at` / `updated_by`: nobody edited these categories. Deleted rows are
+ * cleaned too. Idempotent: once the fields are gone the query matches nothing.
+ * Returns how many rows changed.
+ */
+export const dropCategoryOverrides = async (): Promise<number> => {
+  try {
+    if (!isDbConnected()) {
+      log.debug('No database connection — skipping the category override cleanup');
+      return 0;
+    }
+
+    const result = await CatalogCategoryModel.collection.updateMany(
+      { $or: RETIRED_CATEGORY_FIELDS.map((field) => ({ [field]: { $exists: true } })) },
+      { $unset: Object.fromEntries(RETIRED_CATEGORY_FIELDS.map((field) => [field, ''])) }
+    );
+
+    if (result.modifiedCount) {
+      log.log(`Removed fulfilment / tracking from ${result.modifiedCount} categor${result.modifiedCount === 1 ? 'y' : 'ies'}`);
+    } else {
+      log.debug('No categories carry fulfilment / tracking');
+    }
+    return result.modifiedCount;
+  } catch (error) {
+    log.error(`Category override cleanup failed: ${(error as Error).message}`);
+    return 0;
+  }
+};
+
+/**
+ * Builds the product module's indexes before the server takes traffic.
+ *
+ * Mongoose builds indexes in the background after connecting, so on a fresh
+ * database the first search could arrive before the text index exists
+ * ("text index required for $text query"). `init()` resolves once they are
+ * built. Idempotent: existing indexes are left as they are.
+ */
+export const ensureProductModuleIndexes = async (): Promise<void> => {
+  if (!isDbConnected()) return;
+  try {
+    await Promise.all([CatalogCategoryModel, ProductV2Model, ProductItemModel, ItemStockModel, StockMovementModel, ItemUnitModel, BundleComponentModel].map((m: any) => m.init()));
+    log.debug('Product module indexes are in place');
+  } catch (error) {
+    log.error(`Building the product module indexes failed: ${(error as Error).message}`);
+  }
+};
+
+/**
+ * Phase 4, one-time and idempotent: every stock row with stock but no movements
+ * gets an "Opening balance" movement, so for each row the movements add up to
+ * on_hand. Rows that already have movements are skipped, so a second run writes
+ * nothing.
+ */
+export const backfillOpeningBalances = async (): Promise<number> => {
+  if (!isDbConnected()) return 0;
+  try {
+    const written = await writeOpeningBalances();
+    if (written) log.log(`Wrote ${written} opening-balance stock movement${written === 1 ? '' : 's'}`);
+    else log.debug('Every stock row already has its movements');
+    return written;
+  } catch (error) {
+    log.error(`Opening-balance stock movements failed: ${(error as Error).message}`);
+    return 0;
+  }
+};
+
 export const runMigrations = async (): Promise<void> => {
   await repairUnusablePasswords();
   await backfillCategoryIds();
@@ -279,4 +376,8 @@ export const runMigrations = async (): Promise<void> => {
   await backfillVariantIdentity();
   await dropPlatformKbFolder();
   await dropMockKnowledgeArticles();
+  await moveSiteSettingsToTenantSettings();
+  await dropCategoryOverrides();
+  await ensureProductModuleIndexes();
+  await backfillOpeningBalances();
 };

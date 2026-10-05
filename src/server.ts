@@ -2,6 +2,7 @@ import { createApp } from './app.js';
 import { config } from './config/index.js';
 import { connectDB, disconnectDB } from './config/db.js';
 import { runMigrations } from './data/migrations.js';
+import { warnIfTransactionsUnavailable } from './utils/transaction.util.js';
 
 const startServer = async () => {
   // Attempt to connect to local/configured MongoDB
@@ -12,6 +13,8 @@ const startServer = async () => {
   /* Repairs unusable password hashes and backfills the categoryId foreign key.
      Both are idempotent and safe to run on every boot. */
   await runMigrations();
+  /* Product writes use transactions; say so plainly when the database cannot. */
+  await warnIfTransactionsUnavailable();
 
   const app = createApp();
 

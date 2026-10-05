@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from 'express';
 import { z } from 'zod';
-import { SITE_SETTINGS_ID, SiteSettingsModel } from '../models/SiteSettings.model.js';
+import { tenantSettingsService } from '../services/tenantSettings.service.js';
 import { DEFAULT_LABELS, MODULE_KEYS, isModuleKey } from '../config/modules.js';
 import { createLogger } from '../utils/logger.js';
 import { toAppError } from '../utils/error.util.js';
@@ -70,11 +70,22 @@ const serialise = (doc: any) => {
   const json = doc.toJSON();
   const stored: Record<string, { plural?: string; singular?: string }> = json.labels ?? {};
 
+  /* The settings now live in `tenant_settings` alongside the business settings.
+     Only the site-settings fields are returned here — the same shape as before
+     the move — so the Settings page and its callers see no change. */
   return {
-    ...json,
+    id: json.id,
+    siteName: json.siteName,
+    legalName: json.legalName,
+    tagline: json.tagline,
+    logoUrl: json.logoUrl,
+    faviconUrl: json.faviconUrl,
+    businessType: json.businessType,
     labels: Object.fromEntries(
       MODULE_KEYS.map((key) => [key, { ...DEFAULT_LABELS[key], ...(stored[key] ?? {}) }])
     ),
+    updatedBy: json.updatedBy,
+    ...(json.updated_at ? { updatedAt: json.updated_at } : {}),
   };
 };
 
@@ -93,10 +104,9 @@ export const getSiteSettings = async (_req: Request, res: Response, next: NextFu
        conditional 304 this endpoint used to return.) */
     res.set('Cache-Control', 'no-store');
 
-    const existing = await SiteSettingsModel.findOne({ id: SITE_SETTINGS_ID });
-    /* `new Model()` rather than a create: reading settings should not write to
-       the database, and the schema defaults are the answer we want. */
-    res.json(ok(serialise(existing ?? new SiteSettingsModel({ id: SITE_SETTINGS_ID }))));
+    /* An unsaved default document when nothing is stored: reading settings
+       should not write to the database, and the schema defaults are the answer. */
+    res.json(ok(serialise(await tenantSettingsService.get())));
   } catch (error) {
     next(toAppError(error, 'Could not read the site settings', log));
   }
@@ -123,8 +133,7 @@ export const getPublicSiteSettings = async (
   try {
     res.set('Cache-Control', 'no-store');
 
-    const existing = await SiteSettingsModel.findOne({ id: SITE_SETTINGS_ID });
-    const full = serialise(existing ?? new SiteSettingsModel({ id: SITE_SETTINGS_ID }));
+    const full = serialise(await tenantSettingsService.get());
 
     res.json(
       ok({
@@ -198,11 +207,7 @@ export const updateSiteSettings = async (req: Request, res: Response, next: Next
       }
     }
 
-    const updated = await SiteSettingsModel.findOneAndUpdate(
-      { id: SITE_SETTINGS_ID },
-      { $set: update, ...(Object.keys(unset).length ? { $unset: unset } : {}) },
-      { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
-    );
+    const updated = await tenantSettingsService.update(update, unset);
 
     log.log(`Site settings updated (${Object.keys(patch).join(', ') || 'no changes'})`);
     res.json(ok(serialise(updated), 'Settings saved'));

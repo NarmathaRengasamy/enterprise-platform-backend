@@ -40,6 +40,12 @@ export const updateEventSchema = z.object({
     startTime: z.string().optional(),
     endTime: z.string().optional(),
     dateKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    /* Layout fields the calendar sends when an event is moved. Declared here so
+       the now-enforced schema does not strip them from a reschedule. */
+    dayIndex: z.number().min(0).max(6).optional(),
+    dateNum: z.number().optional(),
+    topOffset: z.number().optional(),
+    height: z.number().optional(),
     client: z.string().optional(),
     email: z.string().optional(),
     phone: z.string().optional(),

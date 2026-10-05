@@ -1,0 +1,12 @@
+{
+  "code": "general",
+  "version": 2,
+  "name": { "en": "General" },
+  "default_fulfilment": "goods",
+  "default_tracking": "none",
+  "fields": [
+    { "key": "brand", "label": { "en": "Brand" }, "type": "text", "filterable": true, "group": "general" },
+    { "key": "material", "label": { "en": "Material" }, "type": "text", "group": "general" }
+  ],
+  "starter_categories": []
+}
