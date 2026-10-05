@@ -3,6 +3,7 @@ import { ProductV2Model } from '../models/ProductV2.model.js';
 import { productTypeService } from './productType.service.js';
 import { catalogCategoryService } from './catalogCategory.service.js';
 import { resolvePrice } from './price.service.js';
+import { availabilityFor, Availability, productAvailability } from './availability.service.js';
 import type { FieldDefinition } from '../types/productType.types.js';
 import { BASE_UNIT, familyOf, parseMeasureText, toMeasure, UnitFamily } from '../utils/units.util.js';
 
@@ -142,15 +143,20 @@ const sizeStage = (key: string | undefined, min: number | undefined, max: number
 };
 
 /** The list-card shape: product fields plus price and availability summaries. */
-const toSummary = (doc: any) => {
+const toSummary = (doc: any, bundleAvailability?: Map<string, Availability>) => {
   const { _id, _filter_items, _page_items, _stock, _unpriced, _name, _size, _nosize, score, ...p } = doc;
   const items: any[] = _page_items ?? [];
   const active = items.filter((i) => i.status === 'active');
-  const priced = active
-    .map((i) => resolvePrice(i))
-    .filter(Boolean)
-    .sort((a: any, b: any) => a.amount_minor - b.amount_minor);
-  const trackedIds = new Set(active.filter((i) => (i.track_inventory ?? p.track_inventory) === true).map((i) => i.id));
+  const cheapest = (list: any[]) =>
+    list
+      .map((i) => resolvePrice(i))
+      .filter(Boolean)
+      .sort((a: any, b: any) => a.amount_minor - b.amount_minor);
+  /* The "from" price follows min_price_minor: normal items, else packs (R49). */
+  const normalPriced = cheapest(active.filter((i) => !i.pack_of));
+  const priced = normalPriced.length ? normalPriced : cheapest(active.filter((i) => i.pack_of));
+  /* Packs are never added on top of their singles (Phase 4). */
+  const trackedIds = new Set(active.filter((i) => !i.pack_of && (i.track_inventory ?? p.track_inventory) === true).map((i) => i.id));
   const rows = (_stock ?? []).filter((s: any) => trackedIds.has(s.item_id));
   const available = rows.reduce((n: number, s: any) => n + (s.on_hand ?? 0) - (s.reserved ?? 0), 0);
   return {
@@ -158,7 +164,13 @@ const toSummary = (doc: any) => {
     item_count: items.length,
     active_item_count: active.length,
     from_price: priced[0] ?? null,
-    availability: trackedIds.size ? { status: 'tracked', available } : { status: 'not_tracked' },
+    /* A bundle's stock is its components' (Phase 4). */
+    availability:
+      p.is_bundle && bundleAvailability
+        ? productAvailability(items, bundleAvailability)
+        : trackedIds.size
+          ? { status: 'tracked', available }
+          : { status: 'not_tracked' },
   };
 };
 
@@ -256,7 +268,7 @@ export const productSearchService = {
                 let: { pid: '$id' },
                 pipeline: [
                   { $match: { $expr: { $eq: ['$product_id', '$$pid'] }, is_deleted: false } },
-                  { $project: { _id: 0, id: 1, sku: 1, price: 1, track_inventory: 1, status: 1 } },
+                  { $project: { _id: 0, id: 1, sku: 1, price: 1, track_inventory: 1, status: 1, pack_of: 1 } },
                 ],
                 as: '_page_items',
               },
@@ -281,8 +293,10 @@ export const productSearchService = {
 
     const [out] = await ProductV2Model.aggregate(pipeline);
     const total = out.total[0]?.n ?? 0;
+    const bundleItemIds = out.results.filter((r: any) => r.is_bundle).flatMap((r: any) => (r._page_items ?? []).map((i: any) => i.id));
+    const bundleAvailability = bundleItemIds.length ? await availabilityFor(bundleItemIds) : undefined;
     return {
-      items: out.results.map(toSummary),
+      items: out.results.map((r: any) => toSummary(r, bundleAvailability)),
       total,
       page,
       limit,

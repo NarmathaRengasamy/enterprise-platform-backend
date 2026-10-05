@@ -2,6 +2,8 @@ import { NextFunction, Request, Response } from 'express';
 import { z } from 'zod';
 import { productV2Service } from '../services/productV2.service.js';
 import { productSearchService, SORTS, MAX_LIMIT } from '../services/productSearch.service.js';
+import { productStatsService } from '../services/productStats.service.js';
+import { productExportService } from '../services/productExport.service.js';
 import { PRICE_UNITS, DIGITAL_DELIVERIES } from '../models/ProductItem.model.js';
 import { FULFILMENTS, TRACKINGS } from '../types/productType.types.js';
 import { ok } from '../utils/response.util.js';
@@ -15,6 +17,8 @@ const log = createLogger('ProductV2Controller');
  * old /api/v1/products until the Phase 5 cut-over.
  *
  *   POST   /search                              any signed-in user (Viewer: active only)
+ *   GET    /stats                               any signed-in user (Viewer: active only)
+ *   POST   /export                              Admin, Editor (the list's filters → CSV)
  *   POST   /variant-preview                     Admin, Editor
  *   GET    /:id                                 any signed-in user (Viewer: active only)
  *   POST   /                                    Admin, Editor
@@ -87,10 +91,19 @@ const itemFields = {
   purchase_limits: purchaseLimits.nullable().optional(),
 };
 
+/* A pack (R47): quantity × a base item of the same product — by SKU on create, by id or SKU when adding. */
+const packOf = z.object({
+  base_item_id: z.string().trim().min(1).optional(),
+  base_sku: z.string().trim().min(1).max(64).optional(),
+  /* A number here; whole and ≥ 2 is a business rule (422 from the service). */
+  quantity: z.number(),
+});
+
 const itemInput = z.object({
   ...itemFields,
   attributes: z.array(attributeValue).max(20).optional(),
   initial_stock: z.number().optional(),
+  pack_of: packOf.optional(),
 });
 
 /* Stock only ever changes through the stock endpoints (Phase 4). */
@@ -144,6 +157,7 @@ export const updateItemSchema = z.object({
   body: z.object({
     ...itemFields,
     attributes: z.undefined({ invalid_type_error: "An item's combination cannot change — add a new item instead" }).optional(),
+    pack_of: z.undefined({ invalid_type_error: 'What a pack holds cannot change — add a new pack instead' }).optional(),
     ...noStock,
   }),
 });
@@ -189,6 +203,22 @@ const handle =
   };
 
 const isViewer = (req: Request) => ((req as any).user?.role ?? 'Viewer') === 'Viewer';
+
+/** The products list KPIs: the whole catalogue (a Viewer: active products only). */
+export const productStats = handle('Could not load the product figures', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json(ok(await productStatsService.stats({ viewer: isViewer(req) })));
+});
+
+/** What the list matches (its filters, every page) as CSV, one row per variant. Admin / Editor. */
+export const exportProducts = handle('Could not export the products', async (req, res) => {
+  const csv = await productExportService.csv(req.body);
+  res.set('Cache-Control', 'no-store');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="products-${new Date().toISOString().slice(0, 10)}.csv"`);
+  /* BOM so Excel reads Tamil / Hindi names as UTF-8. */
+  res.status(200).send(`\uFEFF${csv}`);
+});
 
 export const searchProducts = handle('Could not search the products', async (req, res) => {
   res.set('Cache-Control', 'no-store');

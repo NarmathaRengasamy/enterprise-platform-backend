@@ -145,6 +145,20 @@ export const limitsService = {
   },
 
   /**
+   * Single units a purchase counts against the PRODUCT's limits (R52): an
+   * item's own quantity, a pack as quantity × pack size (a box of 4 bought
+   * twice = 8). An item's own limits count that item as bought (2 boxes = 2).
+   */
+  unitsOf(item: { pack_of?: { quantity: number } | null }, qty: number): number {
+    return item.pack_of ? qty * item.pack_of.quantity : qty;
+  },
+
+  /** A basket's single units for one product (R52) — what product-level limits are checked against. */
+  productUnits(lines: { item: { pack_of?: { quantity: number } | null }; qty: number }[]): number {
+    return lines.reduce((n, l) => n + this.unitsOf(l.item, l.qty), 0);
+  },
+
+  /**
    * How many more this customer may buy (R52–R53). A stub until customers and
    * orders exist: it never blocks, and says so.
    */

@@ -30,6 +30,7 @@ import mediaRoutes from './routes/media.routes.js';
 import productTypeRoutes from './routes/productType.routes.js';
 import catalogCategoryRoutes from './routes/catalogCategory.routes.js';
 import productV2Routes from './routes/productV2.routes.js';
+import stockRoutes from './routes/stock.routes.js';
 import { listBusinessTemplates } from './controllers/business.controller.js';
 import { UPLOADS_ROOT, UPLOADS_URL_PREFIX } from './controllers/media.controller.js';
 
@@ -153,6 +154,8 @@ export const createApp = (): Express => {
   const apiV2Router = express.Router();
   apiV2Router.use(authenticateJWT);
   apiV2Router.use('/products', productV2Routes);
+  /* Phase 4: /items/:id/stock…, /items/:id/units, /units/:id, /items/:id/bundle-components */
+  apiV2Router.use('/', stockRoutes);
   app.use('/api/v2', apiV2Router);
 
   /* Uploaded product images and videos. Public and read-only, like the files on

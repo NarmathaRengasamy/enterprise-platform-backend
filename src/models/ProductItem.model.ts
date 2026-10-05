@@ -34,6 +34,16 @@ const MeasureSchema = new Schema(
   { _id: false }
 );
 
+/* A pack (R47): this item is `quantity` × the base item, e.g. "Box of 4" socks.
+   It has its own SKU, price and tax, but no stock: its availability comes from the base (R48). */
+const PackOfSchema = new Schema(
+  {
+    base_item_id: { type: String, required: true },
+    quantity: { type: Number, required: true },
+  },
+  { _id: false }
+);
+
 const ProductItemSchema = new Schema({
   product_id: { type: String, required: true },
   sku: { type: String, required: true, trim: true },
@@ -41,6 +51,9 @@ const ProductItemSchema = new Schema({
   attributes: { type: [AttributeValueSchema], default: [] },
   /* Sorted `key=value` pairs joined with "|": one item per combination (R20). */
   attribute_signature: { type: String, default: '' },
+
+  /* Set for a pack (R47); null for a normal item. */
+  pack_of: { type: PackOfSchema, default: null },
 
   /* Set when the product has a measured-size variant option; null otherwise. */
   measure: { type: MeasureSchema, default: null },
@@ -70,6 +83,8 @@ ProductItemSchema.index(
 );
 ProductItemSchema.index({ 'attributes.key': 1, 'attributes.value': 1, status: 1 });
 ProductItemSchema.index({ product_id: 1, status: 1 });
+/* "Does this item have live packs?" (delete guard, R49). */
+ProductItemSchema.index({ 'pack_of.base_item_id': 1 });
 /* Size sort and size range filter (R46). */
 ProductItemSchema.index({ product_id: 1, 'measure.base_amount': 1 });
 

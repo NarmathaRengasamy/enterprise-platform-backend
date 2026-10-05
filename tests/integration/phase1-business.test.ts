@@ -270,10 +270,10 @@ describe('POST /product-type/fields', () => {
     expect(res.body.message).toMatch(/at least one option/);
   });
 
-  it('refuses variant use on a number field (422)', async () => {
+  it('refuses variant use on a number field without a unit family (422)', async () => {
     const res = await addField({ label: { en: 'Doors' }, type: 'number', variant_forming: true });
     expect(res.status).toBe(422);
-    expect(res.body.message).toMatch(/Only enum fields can form variants/);
+    expect(res.body.message).toMatch(/A number field can form variants only with a unit family/);
   });
 
   it('refuses min greater than max (422)', async () => {

@@ -62,7 +62,10 @@ export const variantService = {
         label: labels.map((l) => l.value).join(' · '),
         measure: measureOf(attributes, axes),
         /* "500 ml" → OIL-500ML, not OIL-500 */
-        suggested_sku: suggestSku(slug, labels.map((l) => ({ key: l.key, value: l.value.replace(/\s+/g, '') }))),
+        suggested_sku: suggestSku(
+          slug,
+          combo.map((c) => ({ key: c.key, value: typeof c.value === 'string' ? c.value : axisValueLabel(c.value).replace(/\s+/g, '') }))
+        ),
         exists: existingSignatures.has(attribute_signature),
       };
     });

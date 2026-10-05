@@ -8,6 +8,8 @@ import {
   deleteItem,
   deleteProduct,
   getProduct,
+  exportProducts,
+  productStats,
   publishProduct,
   restoreItem,
   restoreProduct,
@@ -29,8 +31,10 @@ const router = Router();
 const writers = requireRoles('Admin', 'Editor');
 const admins = requireRoles('Admin');
 
-/* Before '/:id' so "search" and "variant-preview" are never read as ids. */
+/* Before '/:id' so "search", "stats" and "variant-preview" are never read as ids. */
 router.post('/search', validateRequest(searchSchema), searchProducts);
+router.get('/stats', productStats);
+router.post('/export', writers, validateRequest(searchSchema), exportProducts);
 router.post('/variant-preview', writers, validateRequest(variantPreviewSchema), variantPreview);
 
 router.post('/', writers, validateRequest(createProductSchema), createProduct);

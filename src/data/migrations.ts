@@ -9,6 +9,10 @@ import { CatalogCategoryModel } from '../models/CatalogCategory.model.js';
 import { ProductV2Model } from '../models/ProductV2.model.js';
 import { ProductItemModel } from '../models/ProductItem.model.js';
 import { ItemStockModel } from '../models/ItemStock.model.js';
+import { StockMovementModel } from '../models/StockMovement.model.js';
+import { ItemUnitModel } from '../models/ItemUnit.model.js';
+import { BundleComponentModel } from '../models/BundleComponent.model.js';
+import { writeOpeningBalances } from '../services/stock.service.js';
 import { store } from './store.js';
 import { createLogger } from '../utils/logger.js';
 import { migrateSiteSettingsToTenantSettings } from '../services/tenantSettings.service.js';
@@ -339,10 +343,29 @@ export const dropCategoryOverrides = async (): Promise<number> => {
 export const ensureProductModuleIndexes = async (): Promise<void> => {
   if (!isDbConnected()) return;
   try {
-    await Promise.all([CatalogCategoryModel, ProductV2Model, ProductItemModel, ItemStockModel].map((m: any) => m.init()));
+    await Promise.all([CatalogCategoryModel, ProductV2Model, ProductItemModel, ItemStockModel, StockMovementModel, ItemUnitModel, BundleComponentModel].map((m: any) => m.init()));
     log.debug('Product module indexes are in place');
   } catch (error) {
     log.error(`Building the product module indexes failed: ${(error as Error).message}`);
+  }
+};
+
+/**
+ * Phase 4, one-time and idempotent: every stock row with stock but no movements
+ * gets an "Opening balance" movement, so for each row the movements add up to
+ * on_hand. Rows that already have movements are skipped, so a second run writes
+ * nothing.
+ */
+export const backfillOpeningBalances = async (): Promise<number> => {
+  if (!isDbConnected()) return 0;
+  try {
+    const written = await writeOpeningBalances();
+    if (written) log.log(`Wrote ${written} opening-balance stock movement${written === 1 ? '' : 's'}`);
+    else log.debug('Every stock row already has its movements');
+    return written;
+  } catch (error) {
+    log.error(`Opening-balance stock movements failed: ${(error as Error).message}`);
+    return 0;
   }
 };
 
@@ -356,4 +379,5 @@ export const runMigrations = async (): Promise<void> => {
   await moveSiteSettingsToTenantSettings();
   await dropCategoryOverrides();
   await ensureProductModuleIndexes();
+  await backfillOpeningBalances();
 };

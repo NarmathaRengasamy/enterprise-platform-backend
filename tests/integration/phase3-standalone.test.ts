@@ -6,6 +6,7 @@ import { createApp } from '../../src/app.js';
 import { store } from '../../src/data/store.js';
 import { ProductItemModel } from '../../src/models/ProductItem.model.js';
 import { ItemStockModel } from '../../src/models/ItemStock.model.js';
+import { StockMovementModel } from '../../src/models/StockMovement.model.js';
 import { transactionsSupported, warnIfTransactionsUnavailable } from '../../src/utils/transaction.util.js';
 import { USERS } from '../helpers.js';
 import { admin, creta, freshDatabase, post, seedTenant, V2 } from './phase3-helpers.js';
@@ -93,5 +94,28 @@ describe('standalone server: ordered writes with clean-up', () => {
     expect((await request(app).post(`${V2}/${p.id}/restore`).set(admin)).status).toBe(200);
     expect(await raw('product_items').countDocuments({ is_deleted: false })).toBe(3);
     expect(await raw('item_stock').countDocuments({ is_deleted: false })).toBe(2);
+  });
+});
+
+/* Phase 4 on standalone: stock stays safe without transactions. */
+describe('standalone server: stock (Phase 4)', () => {
+  const ITEMS = '/api/v2/items';
+  const wiper = async (initial_stock: number) =>
+    (await post(app, { name: { en: 'Wiper' }, tracking: 'none', items: [{ sku: 'WIPER', initial_stock }] })).body.data.items[0];
+  const adjust = (id: string, delta: number) => request(app).post(`${ITEMS}/${id}/stock/adjust`).set(admin).send({ delta, reason: 'test' });
+
+  it('two −5 at the same moment on 6 → exactly one succeeds (the guarded $inc needs no transaction)', async () => {
+    const item = await wiper(6);
+    const results = await Promise.all([adjust(item.id, -5), adjust(item.id, -5)]);
+    expect(results.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect((await raw('item_stock').findOne({ item_id: item.id }))?.on_hand).toBe(1);
+  });
+
+  it('undoes the stock change when its movement fails to save', async () => {
+    const item = await wiper(6);
+    vi.spyOn(StockMovementModel, 'create').mockRejectedValueOnce(new Error('forced failure'));
+    expect((await adjust(item.id, -2)).status).toBe(500);
+    expect((await raw('item_stock').findOne({ item_id: item.id }))?.on_hand).toBe(6);
+    expect(await raw('stock_movements').countDocuments({ item_id: item.id, source: 'adjust' })).toBe(0);
   });
 });

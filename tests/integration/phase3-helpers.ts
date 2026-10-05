@@ -6,6 +6,9 @@ import { CatalogCategoryModel } from '../../src/models/CatalogCategory.model.js'
 import { ProductV2Model } from '../../src/models/ProductV2.model.js';
 import { ProductItemModel } from '../../src/models/ProductItem.model.js';
 import { ItemStockModel } from '../../src/models/ItemStock.model.js';
+import { StockMovementModel } from '../../src/models/StockMovement.model.js';
+import { ItemUnitModel } from '../../src/models/ItemUnit.model.js';
+import { BundleComponentModel } from '../../src/models/BundleComponent.model.js';
 import { bearer } from '../helpers.js';
 
 /**
@@ -26,7 +29,7 @@ export const freshDatabase = async () => {
   for (const c of await db.collections()) await c.deleteMany({});
   /* Collections and indexes exist before any transaction writes to them. */
   await Promise.all(
-    [ProductTypeModel, TenantSettingsModel, CatalogCategoryModel, ProductV2Model, ProductItemModel, ItemStockModel].map((m: any) => m.init())
+    [ProductTypeModel, TenantSettingsModel, CatalogCategoryModel, ProductV2Model, ProductItemModel, ItemStockModel, StockMovementModel, ItemUnitModel, BundleComponentModel].map((m: any) => m.init())
   );
 };
 
@@ -46,11 +49,16 @@ export const seedTenant = async (app: any) => {
   return { suv, sedan, accessories, put };
 };
 
-/** "Hyundai Creta" in SUV, Fuel × Colour, with the items given (default: three of the four). */
+/**
+ * "Hyundai Creta" in SUV, Fuel × Colour, with the items given (default: three of the four).
+ * Tracked by quantity (`tracking: 'none'`) so initial stock is accepted: a car's own
+ * default is serial, where units drive stock and initial stock is refused (Phase 4).
+ */
 export const creta = (categoryId: string, over: Record<string, unknown> = {}) => ({
   name: { en: 'Hyundai Creta', ta: 'ஹூண்டாய் க்ரேட்டா' },
   brand: 'Hyundai',
   category_ids: [categoryId],
+  tracking: 'none',
   attributes: [
     { key: 'make', value: 'Hyundai' },
     { key: 'model', value: 'Creta' },

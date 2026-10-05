@@ -71,7 +71,8 @@ describe('variant axes and item combinations', () => {
   it('accepts a variant-ready choice list and refuses anything else', () => {
     expect(checkVariantAxes(TYPE, [{ key: 'fuel', values: ['petrol', 'petrol', 'diesel'] }])).toEqual([{ key: 'fuel', values: ['petrol', 'diesel'] }]);
     expect(() => checkVariantAxes(TYPE, [{ key: 'body', values: ['suv'] }])).toThrow(/not set up to be used for variants/);
-    expect(() => checkVariantAxes(TYPE, [{ key: 'seats', values: ['2'] }])).toThrow(/not a choice list/);
+    /* A number can be a variant option only with a unit family (measured sizes, Phase 3b). */
+    expect(() => checkVariantAxes(TYPE, [{ key: 'seats', values: ['2'] }])).toThrow(/number without a unit family/);
     expect(() => checkVariantAxes(TYPE, [{ key: 'fuel', values: [] }])).toThrow(/at least one/);
     expect(() => checkVariantAxes(TYPE, [{ key: 'fuel', values: ['petrol'] }, { key: 'fuel', values: ['diesel'] }])).toThrow(/twice/);
   });

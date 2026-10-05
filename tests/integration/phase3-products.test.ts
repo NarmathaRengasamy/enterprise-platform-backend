@@ -84,14 +84,17 @@ describe('create (3.2)', () => {
     expect(p.min_price_minor).toBe(154999950);
     expect(p.primary_category_id).toBe(cats.suv.id);
 
+    /* Tracked by quantity (the helper's choice); a car's own default is serial — below. */
+    expect(p).toMatchObject({ fulfilment: 'goods', track_inventory: true, tracking: 'none', effective: { tracking: 'none' } });
+    const plain = (await post(app, creta(cats.suv.id, { slug: 'creta-serial', tracking: undefined, items: [{ sku: 'CRETA-S-1', attributes: [{ key: 'fuel', value: 'petrol' }, { key: 'colour', value: 'red' }] }] }))).body.data;
     /* Car Dealership defaults: goods · on · serial (R13a–R13c). */
-    expect(p).toMatchObject({ fulfilment: 'goods', track_inventory: true, tracking: 'serial', effective: { tracking: 'serial' } });
+    expect(plain).toMatchObject({ fulfilment: 'goods', track_inventory: true, tracking: 'serial', effective: { tracking: 'serial' } });
 
-    expect(await raw('products_v2').countDocuments()).toBe(1);
-    expect(await raw('product_items').countDocuments()).toBe(3);
+    expect(await raw('products_v2').countDocuments()).toBe(2);
+    expect(await raw('product_items').countDocuments()).toBe(4);
     expect(await raw('item_stock').countDocuments()).toBe(2); // P-RED (2) and D-RED (0); P-WHT entered none
-    expect(itemBySku(p, 'CRETA-P-RED').availability).toEqual({ status: 'tracked', on_hand: 2, reserved: 0, available: 2 });
-    expect(itemBySku(p, 'CRETA-P-WHT').availability).toEqual({ status: 'tracked', on_hand: 0, reserved: 0, available: 0 });
+    expect(itemBySku(p, 'CRETA-P-RED').availability).toMatchObject({ status: 'tracked', on_hand: 2, reserved: 0, available: 2 });
+    expect(itemBySku(p, 'CRETA-P-WHT').availability).toMatchObject({ status: 'tracked', on_hand: 0, reserved: 0, available: 0 });
   });
 
   it('"1st free service": fulfilment service pre-fills Track inventory off, SAC accepted, no stock rows', async () => {
@@ -293,10 +296,17 @@ describe('publish, archive, visibility', () => {
     const blocked = await request(app).post(`${V2}/${draft.id}/publish`).set(editor);
     expect(blocked.status).toBe(422);
     expect(blocked.body.message).toMatch(/Make is required/);
-    expect(blocked.body.message).toMatch(/HSN code/);
-    expect(blocked.body.message).toMatch(/GST rate/);
+    /* Tax is optional for publishing since 1 Oct 2026 (Option B, design §10 / A8). */
+    expect(blocked.body.message).not.toMatch(/HSN|SAC|GST/);
     expect((await get(draft.id)).body.data.status).toBe('draft');
     expect((await get(draft.id, viewer)).status).toBe(404);
+
+    /* With Make filled and still no HSN / GST, it publishes. */
+    await request(app).patch(`${V2}/${draft.id}`).set(editor).send({ attributes: [{ key: 'make', value: 'Tata' }, { key: 'model', value: 'X' }] });
+    const noTax = await request(app).post(`${V2}/${draft.id}/publish`).set(editor);
+    expect(noTax.status, JSON.stringify(noTax.body)).toBe(200);
+    expect(noTax.body.data).toMatchObject({ status: 'active', hsn_code: null, gst_rate: null });
+    await request(app).post(`${V2}/${draft.id}/archive`).set(editor);
 
     const p = await createCreta();
     const ok = await request(app).post(`${V2}/${p.id}/publish`).set(editor);

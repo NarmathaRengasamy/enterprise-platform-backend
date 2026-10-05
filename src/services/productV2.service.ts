@@ -2,6 +2,8 @@ import { AppError } from '../middlewares/errorHandler.js';
 import { ProductV2Model } from '../models/ProductV2.model.js';
 import { ProductItemModel } from '../models/ProductItem.model.js';
 import { ItemStockModel } from '../models/ItemStock.model.js';
+import { ItemUnitModel } from '../models/ItemUnit.model.js';
+import { BundleComponentModel } from '../models/BundleComponent.model.js';
 import { INCLUDE_DELETED } from '../models/plugins/base.plugin.js';
 import { newId } from '../utils/id.util.js';
 import { assertMinor } from '../utils/money.util.js';
@@ -12,6 +14,10 @@ import { tenantSettingsService } from './tenantSettings.service.js';
 import { catalogCategoryService } from './catalogCategory.service.js';
 import { pricePerUnit, resolvePrice } from './price.service.js';
 import { limitsService, PurchaseLimitsInput } from './limits.service.js';
+import { stockService } from './stock.service.js';
+import { unitsInStock } from './unit.service.js';
+import { bundlesUsing } from './bundle.service.js';
+import { Availability, availabilityFor, productAvailability } from './availability.service.js';
 import { variantService, suggestSku, MAX_COMBINATIONS } from './variant.service.js';
 import {
   AttributeValue,
@@ -78,9 +84,14 @@ export interface ItemInput {
   initial_stock?: number;
   /** R50: this item's override; each null value = the product's value. */
   purchase_limits?: PurchaseLimitsInput | null;
+  /**
+   * A pack (R47): `quantity` × a base item of the same product. On create the
+   * base is named by its SKU (it has no id yet); when adding an item, by id or SKU.
+   */
+  pack_of?: { base_item_id?: string; base_sku?: string; quantity: number } | null;
 }
 
-export type ItemPatch = Omit<ItemInput, 'attributes' | 'initial_stock'>;
+export type ItemPatch = Omit<ItemInput, 'attributes' | 'initial_stock' | 'pack_of'>;
 
 export interface ProductInput {
   name: Translated;
@@ -278,25 +289,54 @@ interface PreparedItem {
   skuGiven: boolean;
 }
 
-const prepareItem = (it: ItemInput, path: string, ctx: { axes: VariantAxis[]; product: any; currency: string; slug: string }): PreparedItem => {
-  const attributes = checkItemAttributes(it.attributes ?? [], ctx.axes, path);
-  const skuGiven = Boolean(it.sku?.trim());
-  let sku = it.sku?.trim() ?? '';
-  if (skuGiven && !SKU_PATTERN.test(sku)) {
+interface PrepareContext {
+  axes: VariantAxis[];
+  product: any;
+  currency: string;
+  slug: string;
+  /** The product's tracking when tracked (product → type default), else 'none'. */
+  tracking: string;
+}
+
+/** What every item has, normal or pack: price, MRP, tax, media, limits, status. */
+const commonFields = (it: ItemInput, path: string, ctx: PrepareContext) => {
+  if (it.compare_at_minor !== undefined && it.compare_at_minor !== null) assertPriceMinor(it.compare_at_minor, `${path}.compare_at_minor`);
+  return {
+    price: it.price ? checkPrice(it.price, `${path}.price`, ctx.currency) : null,
+    compare_at_minor: it.compare_at_minor ?? null,
+    gst_rate: checkGst(it.gst_rate, `${path}.gst_rate`) ?? null,
+    hsn_code: checkTaxCode(it.hsn_code, `${path}.hsn_code`, 'HSN code') ?? null,
+    digital_delivery: it.digital_delivery ?? null,
+    media: checkMedia(it.media, `${path}.media`),
+    purchase_limits: limitsService.validate(it.purchase_limits, `${path}.purchase_limits`) ?? null,
+    status: it.status ?? 'active',
+  };
+};
+
+const checkSku = (it: ItemInput, path: string) => {
+  const sku = it.sku?.trim() ?? '';
+  if (sku && !SKU_PATTERN.test(sku)) {
     throw invalid('SKU: up to 64 letters, digits, ".", "_", "-" or "/", starting with a letter or digit', `${path}.sku`);
   }
-  if (!skuGiven) sku = suggestSku(ctx.slug, skuValues(attributes, ctx.axes));
-  if (it.compare_at_minor !== undefined && it.compare_at_minor !== null) assertPriceMinor(it.compare_at_minor, `${path}.compare_at_minor`);
+  return sku;
+};
+
+const prepareItem = (it: ItemInput, path: string, ctx: PrepareContext): PreparedItem => {
+  const attributes = checkItemAttributes(it.attributes ?? [], ctx.axes, path);
+  const given = checkSku(it, path);
+  const sku = given || suggestSku(ctx.slug, skuValues(attributes, ctx.axes));
 
   const track_inventory = it.track_inventory ?? null;
   const tracked = track_inventory ?? ctx.product.track_inventory;
   if (it.initial_stock !== undefined) {
+    if (ctx.product.is_bundle) throw conflict(`${sku} is a bundle item — it has no stock of its own; stock its components instead`);
     if (!tracked) throw conflict(`Not tracked: ${sku} has Track inventory off, so it takes no stock`);
+    if (ctx.tracking === 'serial') throw conflict(`${sku} is tracked by serial number — add its units instead of initial stock`);
     assertCount(it.initial_stock, `${path}.initial_stock`, 'Initial stock');
   }
 
   return {
-    skuGiven,
+    skuGiven: Boolean(given),
     initial_stock: it.initial_stock,
     doc: {
       id: newId(),
@@ -304,26 +344,59 @@ const prepareItem = (it: ItemInput, path: string, ctx: { axes: VariantAxis[]; pr
       attributes,
       attribute_signature: signatureOf(attributes),
       track_inventory,
-      price: it.price ? checkPrice(it.price, `${path}.price`, ctx.currency) : null,
-      compare_at_minor: it.compare_at_minor ?? null,
-      gst_rate: checkGst(it.gst_rate, `${path}.gst_rate`) ?? null,
-      hsn_code: checkTaxCode(it.hsn_code, `${path}.hsn_code`, 'HSN code') ?? null,
-      digital_delivery: it.digital_delivery ?? null,
-      media: checkMedia(it.media, `${path}.media`),
+      ...commonFields(it, path, ctx),
       /* R45: the measured size, from the item's size value; null without one. */
       measure: measureOf(attributes, ctx.axes),
-      purchase_limits: limitsService.validate(it.purchase_limits, `${path}.purchase_limits`) ?? null,
-      status: it.status ?? 'active',
+      pack_of: null,
     },
   };
 };
+
+/**
+ * A pack (R47–R49): `quantity` × a base item of the same product. It takes the
+ * base's variant values (its signature adds "|pack=N", so two "packs of 4" of
+ * one base clash), follows the base's Track inventory and has no stock.
+ */
+const preparePack = (it: ItemInput, path: string, ctx: PrepareContext, base: any | undefined): PreparedItem => {
+  const q = it.pack_of?.quantity;
+  if (typeof q !== 'number' || !Number.isInteger(q) || q < 2) throw invalid('A pack holds a whole number of 2 or more', `${path}.pack_of.quantity`);
+  if (!base) throw invalid('The base item must be a live item of this product', `${path}.pack_of`);
+  if (base.pack_of) throw invalid(`${base.sku} is itself a pack — make the pack from a single item`, `${path}.pack_of`);
+  if (ctx.product.is_bundle) throw invalid('A bundle cannot have packs', `${path}.pack_of`);
+  if (ctx.tracking === 'serial') throw invalid('Products tracked by serial number cannot have packs', `${path}.pack_of`);
+  if (it.attributes?.length) throw invalid("A pack takes its base item's values — send no attributes", `${path}.attributes`);
+  if (it.track_inventory !== undefined && it.track_inventory !== null) {
+    throw invalid("A pack follows its base item's Track inventory", `${path}.track_inventory`);
+  }
+  if (it.initial_stock !== undefined) throw conflict(`A pack has no stock of its own — adjust the base item (${base.sku})`);
+  const given = checkSku(it, path);
+  return {
+    skuGiven: Boolean(given),
+    doc: {
+      id: newId(),
+      sku: given || `${String(base.sku).slice(0, 58)}-X${q}`,
+      attributes: base.attributes ?? [],
+      attribute_signature: `${base.attribute_signature ?? ''}|pack=${q}`,
+      track_inventory: null,
+      ...commonFields(it, path, ctx),
+      measure: base.measure ?? null,
+      pack_of: { base_item_id: base.id, quantity: q },
+    },
+  };
+};
+
+/** The product's tracking as it applies to its items: 'none' when Track inventory is off. */
+const trackingOf = (product: { track_inventory?: boolean; tracking?: string | null }, type: any): string =>
+  product.track_inventory ? product.tracking ?? type?.tracking ?? 'none' : 'none';
 
 /** Values for a suggested SKU: a size by its label ("500ml"), not its base amount. */
 const skuValues = (attributes: AttributeValue[], axes: VariantAxis[]): AttributeValue[] =>
   attributes.map((a) => {
     const axis = axes.find((x) => x.key === a.key);
     const at = axis ? axisValueKeys(axis).indexOf(String(a.value)) : -1;
-    return { key: a.key, value: axis && at >= 0 ? axisValueLabel(axis.values[at]).replace(/\s+/g, '') : a.value };
+    /* Only a size loses its spaces ("500 ml" → 500ML); an option value keeps them ("off white" → OFF-WHITE). */
+    const v = axis && at >= 0 ? axis.values[at] : undefined;
+    return { key: a.key, value: v !== undefined && typeof v !== 'string' ? axisValueLabel(v).replace(/\s+/g, '') : a.value };
   });
 
 /** First SKU among these already used by another live item. */
@@ -341,12 +414,36 @@ const freeSku = async (sku: string, reserved: Set<string>) => {
   return candidate;
 };
 
+/**
+ * The "from" price: the cheapest active, priced normal item. Packs are left
+ * out (R49, confirmed 1 Oct 2026) — unless there is no such item, then the
+ * cheapest pack, so it is never blank while something is priced.
+ */
 const minPriceOf = (items: any[]) => {
-  const prices = items
-    .filter((i) => !i.is_deleted && i.status === 'active')
-    .map((i) => resolvePrice(i)?.amount_minor)
-    .filter((v): v is number => typeof v === 'number');
-  return prices.length ? Math.min(...prices) : null;
+  const prices = (list: any[]) =>
+    list
+      .filter((i) => !i.is_deleted && i.status === 'active')
+      .map((i) => resolvePrice(i)?.amount_minor)
+      .filter((v): v is number => typeof v === 'number');
+  const normal = prices(items.filter((i) => !i.pack_of));
+  if (normal.length) return Math.min(...normal);
+  const packs = prices(items.filter((i) => i.pack_of));
+  return packs.length ? Math.min(...packs) : null;
+};
+
+/**
+ * A pack's saving against buying the singles (R49), for display only:
+ * 1 − pack price ÷ (quantity × base price). null unless both are priced in the
+ * same currency with the same tax_inclusive.
+ */
+const packSaving = (pack: any, base: any | undefined) => {
+  if (!pack.pack_of || !base) return null;
+  const pp = resolvePrice(pack);
+  const bp = resolvePrice(base);
+  if (!pp || !bp || bp.amount_minor <= 0 || pp.tax_inclusive !== bp.tax_inclusive || pp.currency !== bp.currency) return null;
+  const full = bp.amount_minor * pack.pack_of.quantity;
+  const fraction = 1 - pp.amount_minor / full;
+  return { fraction: Math.round(fraction * 10000) / 10000, percent: Math.round(fraction * 1000) / 10, amount_minor: full - pp.amount_minor };
 };
 
 const recomputeMinPrice = async (productId: string, tx?: Tx) => {
@@ -381,7 +478,16 @@ const optionMediaFor = (product: any, item: any) => {
 };
 
 /** The wire shape: stored values plus what is actually in force (design §6.3). */
-export const toResponse = (product: any, items: any[], stocks: any[], type: any, deletedItems: any[] = []) => {
+export const toResponse = (
+  product: any,
+  items: any[],
+  stocks: any[],
+  type: any,
+  deletedItems: any[] = [],
+  /** Phase 4: from availability.service (packs, bundles, low stock). Without it, worked out from `stocks`. */
+  availabilityById?: Map<string, Availability>
+) => {
+  const itemsById = new Map([...items, ...deletedItems].map((x: any) => [x.id, x]));
   const p = strip(plain(product));
   const tracking = p.track_inventory ? p.tracking ?? type?.tracking ?? 'none' : 'none';
   const fulfilment = p.fulfilment ?? type?.fulfilment ?? 'goods';
@@ -390,7 +496,9 @@ export const toResponse = (product: any, items: any[], stocks: any[], type: any,
 
   const view = (raw: any) => {
     const i = strip(plain(raw));
-    const tracked = effectiveTrack(i, p);
+    const base = i.pack_of ? itemsById.get(i.pack_of.base_item_id) : undefined;
+    /* A pack follows its base's Track inventory (R48). */
+    const tracked = effectiveTrack(base ?? i, p);
     const rows = stockByItem.get(i.id) ?? [];
     const on_hand = rows.reduce((n, r) => n + (r.on_hand ?? 0), 0);
     const reserved = rows.reduce((n, r) => n + (r.reserved ?? 0), 0);
@@ -401,8 +509,11 @@ export const toResponse = (product: any, items: any[], stocks: any[], type: any,
       measure: i.measure ?? null,
       purchase_limits: i.purchase_limits ?? null,
       resolved_price: resolvePrice(i),
-      /* Worked out here, never stored (R46). */
-      price_per_unit: pricePerUnit(i),
+      /* Worked out here, never stored (R46). A pack of 4 × 500 ml is priced per 2 l. */
+      price_per_unit: pricePerUnit(i.pack_of && i.measure ? { ...i, measure: { ...i.measure, base_amount: i.measure.base_amount * i.pack_of.quantity } } : i),
+      /* Phase 4 (additive). */
+      pack_of: i.pack_of ?? null,
+      pack_saving: packSaving(i, base),
       effective_limits: limits,
       limits_summary: limitsService.summary(limits),
       effective: {
@@ -412,9 +523,9 @@ export const toResponse = (product: any, items: any[], stocks: any[], type: any,
         hsn_code: i.hsn_code ?? p.hsn_code ?? null,
         media: i.media?.length ? i.media : optionMediaFor(p, i) ?? p.media ?? [],
       },
-      availability: tracked
-        ? { status: 'tracked', on_hand, reserved, available: on_hand - reserved }
-        : { status: 'not_tracked' },
+      availability:
+        availabilityById?.get(i.id) ??
+        (tracked && !i.pack_of ? { status: 'tracked', on_hand, reserved, available: on_hand - reserved } : { status: 'not_tracked' }),
     };
   };
 
@@ -426,9 +537,12 @@ export const toResponse = (product: any, items: any[], stocks: any[], type: any,
     effective: { fulfilment, track_inventory: p.track_inventory, tracking },
     items: live,
     ...(deletedItems.length ? { deleted_items: deletedItems.map(view) } : {}),
-    availability: tracked.length
-      ? { status: 'tracked', available: tracked.reduce((n, i) => n + (i.availability as any).available, 0) }
-      : { status: 'not_tracked' },
+    /* Packs are never added on top of their singles (Phase 4). */
+    availability: availabilityById
+      ? productAvailability(live, availabilityById)
+      : tracked.length
+        ? { status: 'tracked', available: tracked.filter((i) => !i.pack_of).reduce((n, i) => n + (i.availability as any).available, 0) }
+        : { status: 'not_tracked' },
   };
 };
 
@@ -468,7 +582,9 @@ export const productV2Service = {
     const deleted = opts.includeDeleted && !product.is_deleted ? all.filter((i) => i.is_deleted) : [];
     const stocks = await ItemStockModel.find({ item_id: { $in: items.map((i) => i.id) }, ...(product.is_deleted ? INCLUDE_DELETED : {}) }).lean<any[]>();
     const type = plain(await productTypeService.getActive());
-    return toResponse(product, items, stocks, type, deleted);
+    /* Live products: availability incl. packs, bundles and low stock (Phase 4). */
+    const availability = product.is_deleted ? undefined : await availabilityFor(items.map((i) => i.id));
+    return toResponse(product, items, stocks, type, deleted, availability);
   },
 
   async create(input: ProductInput) {
@@ -482,21 +598,34 @@ export const productV2Service = {
     const purchaseLimits = limitsService.validate(input.purchase_limits) ?? null;
     const name = cleanTranslated(input.name)!;
 
-    let itemsIn = input.items ?? [];
+    /* Packs (R47) are listed with the items and name their base by SKU. */
+    const all = input.items ?? [];
+    let itemsIn = all.filter((it) => !it.pack_of);
+    const packsIn = all.map((it, i) => ({ it, i })).filter(({ it }) => it.pack_of);
     if (!axes.length) {
-      if (itemsIn.length > 1) throw invalid('A product without variant options has exactly one item', 'items');
+      if (itemsIn.length > 1) throw invalid('A product without variant options has exactly one item (plus any packs of it)', 'items');
       if (!itemsIn.length) itemsIn = [{}]; // R18: the one item, made automatically
     } else if (!itemsIn.length) {
       throw invalid('Choose at least one combination to create', 'items');
     }
-    if (itemsIn.length > MAX_ITEMS) throw invalid(`At most ${MAX_ITEMS} items per product`, 'items');
+    if (itemsIn.length + packsIn.length > MAX_ITEMS) throw invalid(`At most ${MAX_ITEMS} items per product`, 'items');
 
     if (input.slug !== undefined && !SLUG_PATTERN.test(input.slug)) {
       throw invalid('Slug: lowercase letters, digits and single hyphens', 'slug');
     }
     const slug = await uniqueSlug(input.slug || slugify(name.en));
-    const product = { track_inventory: settings.track_inventory };
-    const prepared = itemsIn.map((it, i) => prepareItem(it, `items.${i}`, { axes, product, currency, slug }));
+    const product = { track_inventory: settings.track_inventory, is_bundle: input.is_bundle ?? false };
+    const ctx: PrepareContext = { axes, product, currency, slug, tracking: settings.track_inventory ? settings.tracking : 'none' };
+    const normal = itemsIn.map((it) => prepareItem(it, `items.${all.indexOf(it) >= 0 ? all.indexOf(it) : 0}`, ctx));
+    const packs = packsIn.map(({ it, i }) => {
+      if (it.pack_of?.base_item_id) throw invalid('On create, name the base item by its SKU (base_sku)', `items.${i}.pack_of`);
+      const wanted = it.pack_of?.base_sku?.trim();
+      /* No SKU named: the product's only normal item. */
+      const base = wanted ? normal.find((n) => n.skuGiven && n.doc.sku === wanted)?.doc : normal.length === 1 ? normal[0].doc : undefined;
+      if (wanted && !base) throw invalid(`No item in this request has the SKU "${wanted}"`, `items.${i}.pack_of.base_sku`);
+      return preparePack(it, `items.${i}`, ctx, base);
+    });
+    const prepared = [...normal, ...packs];
 
     const signatures = new Set<string>();
     const given = new Set<string>();
@@ -551,11 +680,8 @@ export const productV2Service = {
         for (const p of prepared) {
           await ProductItemModel.create([{ ...p.doc, product_id: id }], { session: tx.session });
           tx.undo(() => ProductItemModel.collection.deleteOne({ id: p.doc.id }));
-          if (p.initial_stock !== undefined) {
-            const stockId = newId();
-            await ItemStockModel.create([{ id: stockId, item_id: p.doc.id, on_hand: p.initial_stock }], { session: tx.session });
-            tx.undo(() => ItemStockModel.collection.deleteOne({ id: stockId }));
-          }
+          /* With its "Initial stock" movement (Phase 4), so movements add up to on_hand. */
+          if (p.initial_stock !== undefined) await stockService.initial(tx, p.doc.id, p.initial_stock);
         }
       });
     } catch (e) {
@@ -600,6 +726,32 @@ export const productV2Service = {
       existing: current.attributes,
     });
     const settings = settingsFor(type, patch, current);
+
+    /* R31a / R49 / Phase 4: what tracking may change to. */
+    const live = items.map((i) => i.id);
+    const trackingBefore = trackingOf(current, type);
+    const trackingAfter = settings.track_inventory ? settings.tracking : 'none';
+    if ((trackingBefore === 'serial' || trackingBefore === 'batch') && trackingAfter !== trackingBefore && (await unitsInStock(live)) > 0) {
+      throw conflict(`Units are in stock under ${trackingBefore} tracking — sell or remove them before changing tracking`);
+    }
+    if (trackingAfter === 'serial' && trackingBefore !== 'serial') {
+      const pack = items.find((i) => i.pack_of);
+      if (pack) throw conflict(`Products tracked by serial number cannot have packs — delete ${pack.sku} first`);
+      const stocked = await ItemStockModel.findOne({ item_id: { $in: live }, on_hand: { $gt: 0 } }).lean<any>();
+      if (stocked) throw conflict('Stock is on hand — adjust it to 0 first; with serial tracking, stock comes from the units you add');
+    }
+    if (patch.is_bundle !== undefined && patch.is_bundle !== Boolean(current.is_bundle)) {
+      if (!patch.is_bundle && (await BundleComponentModel.exists({ bundle_item_id: { $in: live } }))) {
+        throw conflict('This bundle has components — remove them before it stops being a bundle');
+      }
+      if (patch.is_bundle) {
+        const pack = items.find((i) => i.pack_of);
+        if (pack) throw conflict(`A bundle cannot have packs — delete ${pack.sku} first`);
+        if (await ItemStockModel.exists({ item_id: { $in: live }, on_hand: { $gt: 0 } })) {
+          throw conflict('Stock is on hand — a bundle has no stock of its own; adjust it to 0 first');
+        }
+      }
+    }
 
     if (patch.slug !== undefined && patch.slug !== current.slug) {
       if (!SLUG_PATTERN.test(patch.slug)) throw invalid('Slug: lowercase letters, digits and single hyphens', 'slug');
@@ -654,9 +806,21 @@ export const productV2Service = {
     const product = await liveProduct(productId);
     const currency = product.currency;
     const items = await itemsOf(productId);
-    if (!product.variant_axes.length) throw conflict('This product has no variant options, so it has exactly one item — add a variant option first');
+    const type = plain(await productTypeService.getActive());
+    const ctx: PrepareContext = { axes: product.variant_axes, product, currency, slug: product.slug, tracking: trackingOf(product, type) };
+    if (!input.pack_of && !product.variant_axes.length) {
+      throw conflict('This product has no variant options, so it has exactly one item — add a variant option first, or add a pack of it');
+    }
     if (items.length >= MAX_ITEMS) throw conflict(`At most ${MAX_ITEMS} items per product`);
-    const prepared = prepareItem(input, 'item', { axes: product.variant_axes, product, currency, slug: product.slug });
+    let prepared: PreparedItem;
+    if (input.pack_of) {
+      const { base_item_id, base_sku } = input.pack_of;
+      const base = items.find((i) => (base_item_id ? i.id === base_item_id : base_sku ? i.sku === base_sku.trim() : false));
+      if (!base_item_id && !base_sku) throw invalid('Name the base item (base_item_id or base_sku)', 'pack_of');
+      prepared = preparePack(input, 'item', ctx, base);
+    } else {
+      prepared = prepareItem(input, 'item', ctx);
+    }
     if (items.some((i) => i.attribute_signature === prepared.doc.attribute_signature)) {
       throw conflict('This product already has an item with that combination');
     }
@@ -672,11 +836,7 @@ export const productV2Service = {
       await withTransaction(async (tx) => {
         await ProductItemModel.create([{ ...prepared.doc, product_id: productId }], { session: tx.session });
         tx.undo(() => ProductItemModel.collection.deleteOne({ id: prepared.doc.id }));
-        if (prepared.initial_stock !== undefined) {
-          const stockId = newId();
-          await ItemStockModel.create([{ id: stockId, item_id: prepared.doc.id, on_hand: prepared.initial_stock }], { session: tx.session });
-          tx.undo(() => ItemStockModel.collection.deleteOne({ id: stockId }));
-        }
+        if (prepared.initial_stock !== undefined) await stockService.initial(tx, prepared.doc.id, prepared.initial_stock);
         await recomputeMinPrice(productId, tx);
       });
     } catch (e) {
@@ -706,7 +866,10 @@ export const productV2Service = {
     if (patch.hsn_code !== undefined) set.hsn_code = checkTaxCode(patch.hsn_code, 'hsn_code', 'HSN code') ?? null;
     if (patch.digital_delivery !== undefined) set.digital_delivery = patch.digital_delivery;
     if (patch.media !== undefined) set.media = checkMedia(patch.media, 'media');
-    if (patch.track_inventory !== undefined) set.track_inventory = patch.track_inventory;
+    if (patch.track_inventory !== undefined) {
+      if (item.pack_of && patch.track_inventory !== null) throw invalid("A pack follows its base item's Track inventory", 'track_inventory');
+      set.track_inventory = patch.track_inventory;
+    }
     if (patch.purchase_limits !== undefined) {
       const limits = limitsService.validate(patch.purchase_limits) ?? null;
       limitsService.assertEffective(product.purchase_limits, [{ sku: item.sku, purchase_limits: limits }], 'item');
@@ -742,10 +905,20 @@ export const productV2Service = {
     if (!item) throw notFound('Item');
     const activeOthers = await ProductItemModel.countDocuments({ product_id: productId, status: 'active', id: { $ne: itemId } });
     if (item.status === 'active' && !activeOthers) throw conflict('This is the last active item — a product needs at least one');
+    /* R49: a base with live packs stays; an item a bundle uses stays. */
+    const packs = await ProductItemModel.find({ 'pack_of.base_item_id': itemId }).lean<any[]>();
+    if (packs.length) throw conflict(`${item.sku} has packs (${packs.map((x) => x.sku).join(', ')}) — delete them first`);
+    const usedBy = await bundlesUsing([itemId]);
+    if (usedBy.length) throw conflict(`${item.sku} is in a bundle (${usedBy.map((x) => x.sku).join(', ')}) — remove it from the bundle first`);
     const at = new Date();
     await withTransaction(async (tx) => {
       await ProductItemModel.updateOne({ id: itemId }, { $set: { is_deleted: true, deleted_at: at } }, { session: tx.session });
       tx.undo(() => ProductItemModel.collection.updateOne({ id: itemId }, { $set: { is_deleted: false, deleted_at: null } }));
+      /* Its units and (for a bundle item) its component rows go with it, stamped alike. */
+      await ItemUnitModel.updateMany({ item_id: itemId }, { $set: { is_deleted: true, deleted_at: at } }, { session: tx.session });
+      tx.undo(() => ItemUnitModel.collection.updateMany({ item_id: itemId, deleted_at: at }, { $set: { is_deleted: false, deleted_at: null } }));
+      await BundleComponentModel.updateMany({ bundle_item_id: itemId }, { $set: { is_deleted: true, deleted_at: at } }, { session: tx.session });
+      tx.undo(() => BundleComponentModel.collection.updateMany({ bundle_item_id: itemId, deleted_at: at }, { $set: { is_deleted: false, deleted_at: null } }));
       await ItemStockModel.updateMany({ item_id: itemId }, { $set: { is_deleted: true, deleted_at: at } }, { session: tx.session });
       tx.undo(() => ItemStockModel.collection.updateMany({ item_id: itemId, deleted_at: at }, { $set: { is_deleted: false, deleted_at: null } }));
       await recomputeMinPrice(productId, tx);
@@ -762,6 +935,10 @@ export const productV2Service = {
     if (await ProductItemModel.exists({ product_id: productId, attribute_signature: item.attribute_signature })) {
       throw conflict('This product already has a live item with that combination');
     }
+    /* R49: a pack comes back only with its base. */
+    if (item.pack_of && !(await ProductItemModel.exists({ id: item.pack_of.base_item_id }))) {
+      throw conflict(`The base item of the pack ${item.sku} is deleted — restore it first`);
+    }
     for (const a of item.attributes as AttributeValue[]) {
       const axis = product.variant_axes.find((x: VariantAxis) => x.key === a.key);
       if (!axis || !axisValueKeys(axis).includes(String(a.value))) throw conflict(`${a.key} "${a.value}" is no longer one of this product's options`);
@@ -776,6 +953,11 @@ export const productV2Service = {
           { session: tx.session }
         );
         tx.undo(() => ItemStockModel.collection.updateMany({ item_id: itemId, deleted_at: null, is_deleted: false }, { $set: { is_deleted: true, deleted_at: item.deleted_at } }));
+        for (const M of [ItemUnitModel, BundleComponentModel] as any[]) {
+          const key = M === ItemUnitModel ? 'item_id' : 'bundle_item_id';
+          await M.updateMany({ [key]: itemId, is_deleted: true, deleted_at: item.deleted_at }, { $set: { is_deleted: false, deleted_at: null } }, { session: tx.session });
+          tx.undo(() => M.collection.updateMany({ [key]: itemId, is_deleted: false, deleted_at: null }, { $set: { is_deleted: true, deleted_at: item.deleted_at } }));
+        }
         await recomputeMinPrice(productId, tx);
       });
     } catch (e) {
@@ -813,7 +995,14 @@ export const productV2Service = {
     await liveProduct(id);
     const at = new Date();
     const itemIds = (await itemsOf(id)).map((i) => i.id);
+    /* An item another product's bundle uses stays (its own bundle items go with it). */
+    const usedBy = (await bundlesUsing(itemIds)).filter((b) => b.product_id !== id);
+    if (usedBy.length) throw conflict(`Its items are in other bundles (${usedBy.map((x) => x.sku).join(', ')}) — remove them there first`);
     await withTransaction(async (tx) => {
+      for (const [M, key] of [[ItemUnitModel, 'item_id'], [BundleComponentModel, 'bundle_item_id']] as [any, string][]) {
+        await M.updateMany({ [key]: { $in: itemIds } }, { $set: { is_deleted: true, deleted_at: at } }, { session: tx.session });
+        tx.undo(() => M.collection.updateMany({ [key]: { $in: itemIds }, deleted_at: at }, { $set: { is_deleted: false, deleted_at: null } }));
+      }
       await ItemStockModel.updateMany({ item_id: { $in: itemIds } }, { $set: { is_deleted: true, deleted_at: at } }, { session: tx.session });
       tx.undo(() => ItemStockModel.collection.updateMany({ item_id: { $in: itemIds }, deleted_at: at }, { $set: { is_deleted: false, deleted_at: null } }));
       await ProductItemModel.updateMany({ product_id: id }, { $set: { is_deleted: true, deleted_at: at } }, { session: tx.session });
@@ -846,6 +1035,10 @@ export const productV2Service = {
           { session: tx.session }
         );
         tx.undo(() => ItemStockModel.collection.updateMany({ item_id: { $in: itemIds }, is_deleted: false, deleted_at: null }, { $set: { is_deleted: true, deleted_at: at } }));
+        for (const [M, key] of [[ItemUnitModel, 'item_id'], [BundleComponentModel, 'bundle_item_id']] as [any, string][]) {
+          await M.updateMany({ [key]: { $in: itemIds }, is_deleted: true, deleted_at: at }, { $set: { is_deleted: false, deleted_at: null } }, { session: tx.session });
+          tx.undo(() => M.collection.updateMany({ [key]: { $in: itemIds }, is_deleted: false, deleted_at: null }, { $set: { is_deleted: true, deleted_at: at } }));
+        }
       });
     } catch (e) {
       throw duplicateKey(e);

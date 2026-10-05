@@ -278,6 +278,11 @@ export const productTypeService = {
     }
 
     const settings = await tenantSettingsService.get();
+    /* Once chosen, the business category is locked (Oct 2026): the other business
+       settings can still be saved with it, but never a different category. */
+    if (settings.business_category && settings.business_category !== template.code) {
+      throw conflict("The business category can't be changed once chosen. Add or retire fields in Attributes instead.");
+    }
     const active = await this.getActive();
     let type = active;
     let outcome: 'created' | 'unchanged' | 'replaced' | 'merged';
