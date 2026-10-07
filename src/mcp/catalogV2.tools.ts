@@ -26,22 +26,28 @@ const list = (v: unknown): string[] => (Array.isArray(v) ? v : v === undefined |
 export const catalogV2Tools: Record<string, McpTool> = {
   search_products: {
     description:
-      'Find products for the customer. Use it for "what do you have", "show me red SUVs under 15 lakh", ' +
-      '"cheapest 1 litre oil". Each result is a short card: name, category, price text, availability text ' +
-      'and up to 3 matching variants (items) with their own price and availability. With filters, the price ' +
-      'shown is the matching variant\'s price. Quote `price_text` and `availability.text` exactly as given — do ' +
-      'no arithmetic. Call get_filters first to learn the filter keys and values. Call get_product_details ' +
-      'when the customer picks a product. Only describe products this tool returned; never invent one.',
+      'Find products. Put the customer\'s own words in `search` — e.g. "6 inch brown plain tape", "diesel suv", ' +
+      '"electric cars" — categories, sizes and colours in the words are recognised automatically; `understood` ' +
+      'shows how they were read. Each card has `options` (EVERY size / colour / variant option of that product), ' +
+      'price_text, availability.text and up to 3 sample variants. `range` lists every option across ALL matches ' +
+      '— use it to answer "which sizes / colours do you have". If `has_more` is true there are more products: ' +
+      'call again with `page` = next_page before saying "that is everything". Quote price_text and ' +
+      'availability.text exactly; do no arithmetic. Read `notes` — they say if anything was ignored. Call ' +
+      'get_product_details when the customer picks a product. Only describe products this tool returned.',
     inputSchema: {
       type: 'object',
       properties: {
-        search: { type: 'string', description: 'What the customer wants in their own words, e.g. "creta" or "sunflower oil". Omit to browse.' },
-        category_id: { type: 'string', description: 'Limit to one category (and its sub-categories). Take the id from list_categories.' },
+        search: {
+          type: 'string',
+          description: 'The customer\'s words, e.g. "6 inch plain tape", "brown 3.5 inch", "hyundai diesel", "suv". Omit to browse everything.',
+        },
+        category_id: { type: 'string', description: 'Optional: a category id from list_categories (a category name also works). Includes its sub-categories.' },
         filters: {
           type: 'object',
           description:
-            'Attribute filters from get_filters: { "<key>": ["<value>", …] }, e.g. { "fuel": ["petrol"], "colour": ["red"] }. ' +
-            'Use option `value`s, not labels. Sizes accept text like "1 l" or "500 g".',
+            'Optional exact filters: { "<key>": ["<value or label>", …] } with keys from get_filters, e.g. ' +
+            '{ "tape_size": ["6 inch"] } or { "engine": ["diesel"] }. Labels and loose text are accepted. Usually ' +
+            'not needed — the words in `search` are enough.',
           additionalProperties: { type: 'array', items: { type: ['string', 'number', 'boolean'] } },
         },
         price_min: { type: 'number', description: 'Lowest price in rupees (e.g. 500000 for 5 lakh).' },
@@ -52,8 +58,8 @@ export const catalogV2Tools: Record<string, McpTool> = {
           enum: ['relevance', 'price_asc', 'price_desc', 'newest', 'name', 'size_asc', 'size_desc'],
           description: "price_asc = cheapest first. relevance only with a search term. Defaults to relevance with a search, newest without.",
         },
-        page: { type: 'number', description: 'Page, starting at 1.' },
-        limit: { type: 'number', description: 'Products per page: 3–5 for WhatsApp and voice, up to 10 for web chat. Default 10, max 50.' },
+        page: { type: 'number', description: 'Page, starting at 1. Use next_page from the previous reply.' },
+        limit: { type: 'number', description: 'Products per page. Default 10, max 50. Use 20–50 when listing a whole range.' },
         language,
       },
     },
@@ -74,13 +80,6 @@ export const catalogV2Tools: Record<string, McpTool> = {
         language: params.language,
       });
       log.debug(`mcp search_products -> ${result.total} match(es)`, { search: params.search });
-      if (!result.products.length) {
-        return {
-          ...result,
-          message:
-            'Nothing matched. Suggest a broader search, fewer filters or another category (list_categories). Do not invent products.',
-        };
-      }
       return result;
     },
   },
@@ -105,13 +104,13 @@ export const catalogV2Tools: Record<string, McpTool> = {
 
   get_filters: {
     description:
-      'What you can filter products by (e.g. Fuel, Body type, Colour, Size) with the options that have ' +
-      'products, plus the sort options. Call it before search_products whenever the customer names a feature, ' +
-      'and use the option `value` in search_products filters. Pass category_id to see only that category\'s options.',
+      'The options products really have (e.g. Tape Size, Colour, Engine, Body type), each with how many ' +
+      'products have it. Use it to answer "which sizes / colours / fuel types do you have" in one call. ' +
+      'Pass category_id (id or name) to limit it to one category.',
     inputSchema: {
       type: 'object',
       properties: {
-        category_id: { type: 'string', description: 'Optional: only options found in this category (from list_categories).' },
+        category_id: { type: 'string', description: 'Optional: a category id or name, e.g. "Plain Tape".' },
         language,
       },
     },

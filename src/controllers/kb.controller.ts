@@ -8,6 +8,7 @@ import { ok } from '../utils/response.util.js';
 import { perfoxFetch, UPLOAD_TIMEOUT_MS } from '../utils/perfox.util.js';
 import { KbFileRefModel } from '../models/KbFileRef.model.js';
 import { buildCatalogDocument } from '../services/catalogMarkdown.js';
+import { kbCatalogService } from '../services/kbCatalog.service.js';
 
 const log = createLogger('KnowledgeBaseController');
 
@@ -516,7 +517,7 @@ export const uploadMarkdown = async (req: Request, res: Response, next: NextFunc
     const form = new FormData();
     /* The content type goes on the part, never on the request: fetch has to
        write the multipart boundary itself. */
-    form.append('file', new Blob([content], { type: 'text/markdown' }), fileName);
+    form.append('file', new Blob([content], { type: 'text/markdown; charset=utf-8' }), fileName);
     form.append('name', fileName);
     /* Omitted entirely for the root — an empty folder_id is not the same as none. */
     if (target.id) form.append('folder_id', target.id);
@@ -724,6 +725,8 @@ export const generateCatalogSchema = z.object({
     includeProducts: z.boolean().optional(),
     includeCategories: z.boolean().optional(),
     template: z.enum(['qa', 'reference']).optional(),
+    /* Language of names and labels in the document; English by default. */
+    language: z.enum(['en', 'ta', 'hi']).optional(),
     /* Off by default: removing someone's file is not a side effect to assume. */
     replaceExisting: z.boolean().optional(),
   }),
@@ -732,32 +735,36 @@ export const generateCatalogSchema = z.object({
 /**
  * POST /knowledge/catalog
  *
- * Compiles the product catalogue into one markdown document and uploads it.
+ * Compiles the PUBLISHED product catalogue (product module v2) into one
+ * markdown document and uploads it. Drafts, archived and deleted products,
+ * inactive variants and hidden categories are left out.
  *
  * The document is built here rather than in the browser: the catalogue is
  * already on this side, the client could only ever page through part of it, and
- * which fields are excluded (price, stock, margin) is a policy decision that a
+ * which fields are excluded (price, tax, stock) is a policy decision that a
  * caller should not be able to opt out of.
  */
 export const generateCatalog = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const target = await resolveTargetFolder(req.body.folderId);
 
-    /* No pagination: the whole catalogue goes in, or the document is a partial
-       answer that reads as a complete one. */
-    const [products, categories] = await Promise.all([
-      store.getProducts(),
-      store.getCategories(),
-    ]);
+    /* No pagination: every published product goes in, or the document is a
+       partial answer that reads as a complete one. */
+    const catalog = await kbCatalogService.collect(req.body.language);
 
-    const doc = buildCatalogDocument(products, categories, {
+    const doc = buildCatalogDocument(catalog, {
       includeProducts: req.body.includeProducts,
       includeCategories: req.body.includeCategories,
       template: req.body.template,
     });
 
     if (!doc.productCount && !doc.categoryCount) {
-      throw new AppError('Select products or categories to generate from', 400);
+      throw new AppError(
+        req.body.includeProducts === false && req.body.includeCategories === false
+          ? 'Select products or categories to generate from'
+          : 'Nothing to generate: there are no published products or visible categories yet',
+        400
+      );
     }
 
     /* Perfox assigns a new id per upload, so re-importing would stack copies of
@@ -784,7 +791,9 @@ export const generateCatalog = async (req: Request, res: Response, next: NextFun
     }
 
     const form = new FormData();
-    form.append('file', new Blob([doc.content], { type: 'text/markdown' }), doc.name);
+    /* Say UTF-8 explicitly: without it the file was read as Windows-1252 and every
+       "—" / "·" / Tamil / Hindi character turned into "â€”"-style garbage. */
+    form.append('file', new Blob([doc.content], { type: 'text/markdown; charset=utf-8' }), doc.name);
     form.append('name', doc.name);
     /* Omitted entirely for the root — an empty folder_id is not the same as none. */
     if (target.id) form.append('folder_id', target.id);
@@ -807,10 +816,12 @@ export const generateCatalog = async (req: Request, res: Response, next: NextFun
       { upsert: true }
     );
 
+    const { skipped } = catalog;
     log.log(
-      `Generated ${doc.name} (${doc.productCount} product(s), ${doc.categoryCount} ` +
-        `categor(y/ies), ${doc.content.length} chars) into ${target.name}` +
-        (replaced ? `, replacing ${replaced} previous copy(ies)` : '')
+      `Generated ${doc.name} (${doc.productCount} published product(s), ${doc.categoryCount} ` +
+        `categor(y/ies), ${doc.content.length} chars) into ${target.name}; left out ${skipped.drafts} draft(s), ` +
+        `${skipped.archived} archived, ${skipped.no_active_variants} with no active variant` +
+        (replaced ? `; replaced ${replaced} previous copy(ies)` : '')
     );
 
     return res.status(201).json(
@@ -819,10 +830,11 @@ export const generateCatalog = async (req: Request, res: Response, next: NextFun
           file,
           productCount: doc.productCount,
           categoryCount: doc.categoryCount,
+          skipped,
           replaced,
           sizeBytes: Buffer.byteLength(doc.content, 'utf8'),
         },
-        `Catalog compiled from ${doc.productCount} product(s) and ${doc.categoryCount} categor(y/ies)`
+        `Catalog compiled from ${doc.productCount} published product(s) and ${doc.categoryCount} categor(y/ies)`
       )
     );
   } catch (error) {

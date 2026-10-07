@@ -242,10 +242,13 @@ const toSummary = (doc: any, bundleAvailability?: Map<string, Availability>) => 
 
 export const productSearchService = {
   /** `viewer` (or the public catalogue) only ever sees active products. */
-  async search(filters: SearchFilters, opts: { viewer: boolean }) {
+  /** `allVariantFacets` (AI / public catalogue): also count the variant-forming choice attributes. */
+  async search(filters: SearchFilters, opts: { viewer: boolean; allVariantFacets?: boolean }) {
     const type = plain(await productTypeService.getActive());
     const fields = new Map<string, FieldDefinition>(((type?.fields ?? []) as FieldDefinition[]).map((f) => [f.key, f]));
-    const facetFields = [...fields.values()].filter((f) => f.filterable && !f.deprecated && (f.type === 'enum' || f.type === 'boolean'));
+    const facetFields = [...fields.values()].filter(
+      (f) => (f.filterable || (opts.allVariantFacets && f.variant_forming)) && !f.deprecated && (f.type === 'enum' || f.type === 'boolean')
+    );
 
     const page = Math.max(1, Math.floor(filters.page ?? 1));
     const limit = Math.min(MAX_LIMIT, Math.max(1, Math.floor(filters.limit ?? 20)));
@@ -327,6 +330,8 @@ export const productSearchService = {
         },
       },
       ...(attrFilters.length ? matchItemsStages(attrFilters) : []),
+      /* Customers only: a product whose only matching variants are inactive is not a match. */
+      ...(attrFilters.length && opts.viewer ? [{ $match: { '_match.0': { $exists: true } } }] : []),
       ...(attrFilters.length && priceRange ? [{ $match: { _match_price: priceRange } }] : []),
       ...(sized ? [sizeStage(filters.measure_key, filters.measure_min, filters.measure_max)] : []),
       ...(ranged ? [{ $match: { _size: { $ne: null } } }] : []),
