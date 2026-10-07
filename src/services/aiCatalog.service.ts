@@ -34,7 +34,7 @@ export const MAX_DETAIL_IDS = 20;
 export const MAX_AVAILABILITY_IDS = 50;
 
 const plain = (d: any) => (d && typeof d.toJSON === 'function' ? d.toJSON() : d);
-const tr = (t: any, lang: Lang): string => (t ? t[lang] || t.en || '' : '');
+export const tr = (t: any, lang: Lang): string => (t ? t[lang] || t.en || '' : '');
 
 /* ---------------------------------------------------------------- text */
 
@@ -80,7 +80,7 @@ export const availabilityView = (a: Availability | null | undefined): Availabili
 const NOT_PRICED_NOTE = 'Not priced — do not quote a figure. Offer to take an enquiry.';
 
 /** An absolute media URL when PUBLIC_ASSET_BASE_URL is set (uploads are stored as "/uploads/…"). */
-const assetUrl = (url: string | undefined | null) => {
+export const assetUrl = (url: string | undefined | null) => {
   if (!url) return null;
   const base = process.env.PUBLIC_ASSET_BASE_URL?.trim().replace(/\/+$/, '');
   return base && url.startsWith('/') ? `${base}${url}` : url;
@@ -91,29 +91,40 @@ const hasTaxOf = (p: any, items: any[]) =>
 
 /* ------------------------------------------------------------- context */
 
-interface Ctx {
+export interface Ctx {
   lang: Lang;
   fields: Map<string, any>;
   /** Live, visible categories: id → path ("Vehicles › SUV"). */
   paths: Map<string, string>;
+  /** Visible category id → its own name in every language (for matching the customer's words). */
+  names: Map<string, string[]>;
+  /** Visible category id → its visible sub-category ids. */
+  children: Map<string, string[]>;
 }
 
-const context = async (lang: Lang): Promise<Ctx> => {
+export const context = async (lang: Lang): Promise<Ctx> => {
   const type = plain(await productTypeService.getActive());
   const fields = new Map<string, any>(((type?.fields ?? []) as any[]).map((f) => [f.key, f]));
   const paths = new Map<string, string>();
-  const walk = (nodes: any[], trail: string[]) =>
+  const names = new Map<string, string[]>();
+  const children = new Map<string, string[]>();
+  const walk = (nodes: any[], trail: string[], parent: string | null) =>
     nodes.forEach((n) => {
       if (n.status === 'hidden' || n.is_deleted) return; // a hidden category hides its sub-categories too
       const path = [...trail, tr(n.name, lang) || n.code];
       paths.set(n.id, path.join(' › '));
-      walk(n.children ?? [], path);
+      names.set(n.id, [n.name?.en, n.name?.ta, n.name?.hi, n.code].filter(Boolean));
+      if (parent) children.set(parent, [...(children.get(parent) ?? []), n.id]);
+      walk(n.children ?? [], path, n.id);
     });
-  walk(await catalogCategoryService.tree(false), []);
-  return { lang, fields, paths };
+  walk(await catalogCategoryService.tree(false), [], null);
+  return { lang, fields, paths, names, children };
 };
 
-const valueText = (ctx: Ctx, key: string, value: unknown, item?: any): string => {
+/** A category and its visible sub-categories. */
+const scopeOf = (ctx: Ctx, id: string): string[] => [id, ...(ctx.children.get(id) ?? []).flatMap((c) => scopeOf(ctx, c))];
+
+export const valueText = (ctx: Ctx, key: string, value: unknown, item?: any): string => {
   if (item?.measure && typeof value === 'number') return measureLabel(item.measure);
   const f = ctx.fields.get(key);
   if (f?.type === 'boolean') return value ? 'Yes' : 'No';
@@ -134,6 +145,210 @@ const minMaxSummary = (product: any, item: any) => {
   const l = limitsService.effective(product.purchase_limits, item.purchase_limits);
   /* Per-customer windows are not offered on the form, so they are not shown either. */
   return limitsService.summary({ ...l, per_customer: { day: null, week: null, month: null, year: null, lifetime: null } }) || null;
+};
+
+/* ------------------------------------------------- understanding words */
+
+/*
+ * The agent (and a storefront search box) speaks the customer's words —
+ * "6 inch", "144 mm", "brown", "petrol", "plain tape" — while filters need
+ * exact keys and option values ("tape_size": "6inch_144mm"). Translating is
+ * done HERE, in code, so a model never has to guess: words in the search text
+ * become a category and filters, filter values may be labels or loose text,
+ * and an unknown filter key is ignored with a hint instead of failing.
+ */
+
+/* Words that carry no product meaning. */
+const STOP = new Set(
+  'i im want wanted need needs show me give the a an with in of for do does you have has any please some and or to is are what which whats available buy looking look get details detail about your we our my can could price prices cost tell all list options option see find there under below above over within upto between less more than lakh lakhs crore rs rupees inr budget cheap cheapest cheaper best good new latest top'.split(
+    ' '
+  )
+);
+/* Words too generic to pick an option on their own ("inch" would match every size). */
+const GENERIC = new Set('inch inches mm cm m l lit litre liter ml g kg tape tapes color colors colour colours standard special base wheel wheels size sizes type types'.split(' '));
+
+const norm = (s: unknown) =>
+  String(s ?? '')
+    .toLowerCase()
+    .replace(/[″”"]/g, ' inch ')
+    .replace(/\binches\b/g, 'inch')
+    .replace(/[_()\-/,:;|]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+const compact = (s: unknown) => norm(s).replace(/[^\p{L}\p{N}.]/gu, '');
+const numbersIn = (s: unknown) => (String(s ?? '').match(/\d+(?:\.\d+)?/g) ?? []).map(Number);
+const labelsOf = (o: any): string[] => [o.label?.en, o.label?.ta, o.label?.hi].filter(Boolean);
+const liveOptions = (f: any): any[] => (f.options ?? []).filter((o: any) => !o.deprecated);
+
+/** Option values of a choice attribute matching one piece of input (value, label, "6 inch", "144 mm", "petrol"). */
+const matchOptions = (f: any, input: unknown): string[] => {
+  const opts = liveOptions(f);
+  const raw = String(input ?? '').trim();
+  if (!raw) return [];
+  const exact = opts.filter((o) => o.value === raw);
+  if (exact.length) return exact.map((o) => o.value);
+  const c = compact(raw);
+  const same = opts.filter((o) => compact(o.value) === c || labelsOf(o).some((l) => compact(l) === c));
+  if (same.length) return same.map((o) => o.value);
+  const nums = numbersIn(raw);
+  if (nums.length) {
+    /* "6", "6 inch", "144mm" → the option whose LABEL has those numbers ("6inch(144mm)"). */
+    return opts.filter((o) => labelsOf(o).some((l) => nums.every((n) => numbersIn(l).includes(n)))).map((o) => o.value);
+  }
+  if (c.length < 3) return [];
+  /* "petrol" → "1.5 l Petrol" and "1 lit Petrol"; "white" → "Milky White". */
+  return opts
+    .filter((o) => [o.value, ...labelsOf(o)].some((l) => compact(l).includes(c) || (compact(l).length >= 3 && c.includes(compact(l)))))
+    .map((o) => o.value);
+};
+
+export const fieldName = (ctx: Ctx, f: any) => tr(f.label, ctx.lang) || f.key;
+const optionLabel = (ctx: Ctx, f: any, value: unknown) => {
+  const o = (f.options ?? []).find((x: any) => x.value === value);
+  return o ? tr(o.label, ctx.lang) || String(value) : String(value);
+};
+
+/** Attribute keys used by products on sale (optionally inside some categories). */
+const usedKeys = async (scope?: string[]): Promise<Set<string>> => {
+  const rows = await ProductV2Model.aggregate<{ _id: string }>([
+    { $match: { is_deleted: false, status: 'active', ...(scope ? { category_ids: { $in: scope } } : {}) } },
+    { $project: { k: { $setUnion: [{ $ifNull: ['$attributes.key', []] }, { $ifNull: ['$variant_axes.key', []] }] } } },
+    { $unwind: '$k' },
+    { $group: { _id: '$k' } },
+  ]);
+  return new Set(rows.map((r) => r._id));
+};
+
+interface Understood {
+  category_id?: string;
+  filters: Record<string, (string | number | boolean)[]>;
+  text: string;
+  notes: string[];
+}
+
+/** Resolves the agent's `filters`: keys by key or label, values by value, label or loose text. */
+const resolveFilters = (ctx: Ctx, input: Record<string, unknown> | undefined, used: Set<string>, notes: string[]) => {
+  const out: Record<string, (string | number | boolean)[]> = {};
+  const usable = [...ctx.fields.values()].filter((f) => !f.deprecated && used.has(f.key));
+  const validKeys = () => usable.map((f) => f.key).join(', ');
+  for (const [rawKey, rawValues] of Object.entries(input ?? {})) {
+    const values = (Array.isArray(rawValues) ? rawValues : [rawValues]).filter((v) => v !== null && v !== undefined && v !== '') as (string | number | boolean)[];
+    if (!values.length) continue;
+    const kc = compact(rawKey);
+    let field = ctx.fields.get(rawKey) ?? usable.find((f) => compact(f.key) === kc || labelsOf(f).some((l) => compact(l) === kc));
+    const resolve = (f: any) => {
+      if (f.type === 'enum') return [...new Set(values.flatMap((v) => matchOptions(f, v)))];
+      if (f.type === 'boolean') return values.map((v) => v === true || /^(true|yes|y|1)$/i.test(String(v)));
+      return values; // sizes ("1 l") and text are checked by the search itself
+    };
+    let resolved = field && !field.deprecated ? resolve(field) : [];
+    /* Wrong or unknown key ("width", "size" for a tape): use the one attribute these values belong to. */
+    if (!resolved.length) {
+      const owners = usable.filter((f) => f.type === 'enum' && values.some((v) => matchOptions(f, v).length));
+      if (owners.length === 1) {
+        if (field?.key !== owners[0].key) notes.push(`"${rawKey}" read as ${fieldName(ctx, owners[0])}`);
+        field = owners[0];
+        resolved = resolve(field);
+      }
+    }
+    if (!field || !resolved.length) {
+      notes.push(`Ignored filter ${rawKey}=${values.join('/')}: no such option. Valid filter keys: ${validKeys()} (call get_filters for their options).`);
+      continue;
+    }
+    out[field.key] = [...new Set([...(out[field.key] ?? []), ...resolved])];
+  }
+  return out;
+};
+
+/**
+ * Reads the search text: a category name, sizes ("6 inch", "144mm", "1.5 l")
+ * and option words ("brown", "petrol", "milky white") become a category and
+ * filters; what is left is searched as text. Ambiguous words stay as text.
+ */
+const understandText = async (ctx: Ctx, text: string, categoryId: string | undefined): Promise<Understood> => {
+  const result: Understood = { filters: {}, text: '', notes: [] };
+  let t = ` ${norm(text)} `;
+  const take = (phrase: string) => {
+    t = t.replace(` ${phrase} `, ' ');
+  };
+
+  /* 1. Category: the longest category name found ("plain tape", "suv", "suvs"). */
+  if (!categoryId) {
+    let best: { id: string; phrase: string } | null = null;
+    for (const [id, list] of ctx.names) {
+      for (const name of list) {
+        const n = norm(name);
+        if (n.length < 2) continue;
+        for (const phrase of [n, `${n}s`, n.replace(/s$/, '')]) {
+          if (phrase && t.includes(` ${phrase} `) && (!best || phrase.length > best.phrase.length)) best = { id, phrase };
+        }
+      }
+    }
+    if (best) {
+      result.category_id = best.id;
+      take(best.phrase);
+    }
+  }
+
+  /* Only attributes used inside the category, so "red" means the tape colour, not a leftover t-shirt colour. */
+  const scopeId = categoryId ?? result.category_id;
+  const used = await usedKeys(scopeId ? scopeOf(ctx, scopeId) : undefined);
+  const enumFields = [...ctx.fields.values()].filter((f) => f.type === 'enum' && !f.deprecated && used.has(f.key));
+  const add = (f: any, values: string[]) => (result.filters[f.key] = [...new Set([...(result.filters[f.key] ?? []), ...values])] as string[]);
+
+  /* 2. Sizes: a number with a unit. */
+  for (const m of [...t.matchAll(/(\d+(?:\.\d+)?)\s*(inch|in|mm|cm|m|l|lit|litre|liter|ml|kg|g)(?=\s)/g)]) {
+    let owners = enumFields.map((f) => ({ f, v: matchOptions(f, m[0]) })).filter((x) => x.v.length);
+    /* "144 mm" is the tape width, not "144 pieces per box": prefer options whose label carries the unit. */
+    if (owners.length > 1) {
+      const unit = `${m[1]}${m[2] === 'in' ? 'inch' : m[2]}`;
+      const withUnit = owners
+        .map((x) => ({ f: x.f, v: x.v.filter((val) => labelsOf(liveOptions(x.f).find((o) => o.value === val) ?? {}).some((l) => compact(l).includes(unit))) }))
+        .filter((x) => x.v.length);
+      if (withUnit.length) owners = withUnit;
+    }
+    if (owners.length === 1) {
+      add(owners[0].f, owners[0].v);
+      take(m[0].trim());
+    }
+  }
+
+  /* 3. Whole option labels first ("milky white"), then single meaningful words ("brown", "petrol"). */
+  const hits = new Map<string, { f: any; values: Set<string> }[]>();
+  const hit = (phrase: string, f: any, value: string) => {
+    const list = hits.get(phrase) ?? [];
+    const entry = list.find((x) => x.f.key === f.key) ?? (list.push({ f, values: new Set() }), list[list.length - 1]);
+    entry.values.add(value);
+    hits.set(phrase, list);
+  };
+  for (const pass of ['phrase', 'word'] as const) {
+    hits.clear();
+    for (const f of enumFields) {
+      for (const o of liveOptions(f)) {
+        for (const label of [...labelsOf(o), String(o.value)]) {
+          const n = norm(label);
+          if (pass === 'phrase') {
+            if (n.includes(' ') && n.length >= 3 && t.includes(` ${n} `)) hit(n, f, o.value);
+          } else {
+            for (const w of n.split(' ')) {
+              if (w.length >= 3 && !/\d/.test(w) && !GENERIC.has(w) && !STOP.has(w) && t.includes(` ${w} `)) hit(w, f, o.value);
+            }
+          }
+        }
+      }
+    }
+    for (const [phrase, owners] of hits) {
+      if (owners.length !== 1) continue; // the same word in two attributes: leave it as text
+      add(owners[0].f, [...owners[0].values]);
+      take(phrase);
+    }
+  }
+
+  result.text = norm(t)
+    .split(' ')
+    .filter((w) => w && !STOP.has(w) && !GENERIC.has(w) && !/^\d+(\.\d+)?$/.test(w))
+    .join(' ');
+  return result;
 };
 
 /* --------------------------------------------------------------- items */
@@ -178,23 +393,105 @@ const toPaise = (rupees: unknown) => {
   return Math.round(n * 100);
 };
 
+export const pickLang = (language: unknown): Lang => (LANGUAGES.includes(language as Lang) ? (language as Lang) : 'en');
+
+/** A category id — or a name the agent passed instead of one ("Plain Tape", "suv"). */
+const resolveCategory = (ctx: Ctx, raw: string | undefined, notes: string[]): string | undefined => {
+  const value = raw?.trim();
+  if (!value) return undefined;
+  if (ctx.paths.has(value)) return value;
+  const c = compact(value);
+  const byName = [...ctx.names].find(([, list]) => list.some((n) => compact(n) === c || `${compact(n)}s` === c))?.[0];
+  if (byName) return byName;
+  notes.push(`Ignored category "${value}" — not found. Call list_categories for the ids.`);
+  return undefined;
+};
+
+/** Every option a product's active variants have, by attribute name. */
+export const optionsOf = (ctx: Ctx, p: any, own: any[]): Record<string, string[]> => {
+  const out: Record<string, string[]> = {};
+  for (const a of p.variant_axes ?? []) {
+    const f = ctx.fields.get(a.key);
+    const seen = new Map<string, string>();
+    for (const i of own) {
+      if (i.pack_of) continue;
+      const v = (i.attributes ?? []).find((x: any) => x.key === a.key)?.value;
+      if (v !== undefined && !seen.has(String(v))) seen.set(String(v), valueText(ctx, a.key, v, i));
+    }
+    if (seen.size) out[f ? fieldName(ctx, f) : a.key] = [...seen.values()];
+  }
+  return out;
+};
+
+/** Facet counts → { "Tape Size": ["1 inch(24mm) · 2 products", …] } in the attribute's own option order. */
+const rangeOf = (ctx: Ctx, facets: Record<string, { value: unknown; count: number }[]>, used: Set<string>): Record<string, string[]> => {
+  const out: Record<string, string[]> = {};
+  for (const f of ctx.fields.values()) {
+    if (f.type !== 'enum' || !used.has(f.key) || !facets[f.key]?.length) continue;
+    const counts = new Map<unknown, number>(facets[f.key].map((b) => [b.value, b.count]));
+    out[fieldName(ctx, f)] = liveOptions(f)
+      .filter((o) => counts.has(o.value))
+      .map((o) => `${tr(o.label, ctx.lang) || o.value} · ${counts.get(o.value)} product${counts.get(o.value) === 1 ? '' : 's'}`);
+  }
+  return out;
+};
+
 export const aiCatalogService = {
-  /** search_products: compact cards (G2) with up to 3 matching items each (G1, G3). */
+  /**
+   * search_products: compact cards (G2) with up to 3 matching items each (G1, G3).
+   * The customer's words are understood here (category, sizes, colours …), every
+   * card lists ALL its options, and the reply says plainly whether more pages exist.
+   */
   async search(input: AiSearchInput) {
-    const lang: Lang = LANGUAGES.includes(input.language as Lang) ? (input.language as Lang) : 'en';
+    const ctx = await context(pickLang(input.language));
     const limit = Math.min(50, Math.max(1, Math.floor(input.limit ?? 10)));
-    const filters: SearchFilters = {
-      search: input.search?.trim() || undefined,
-      category_id: input.category_id || undefined,
-      attributes: input.filters,
+    const page = Math.max(1, Math.floor(input.page ?? 1));
+    const notes: string[] = [];
+
+    let categoryId = resolveCategory(ctx, input.category_id, notes);
+    const understood: Understood = input.search?.trim()
+      ? await understandText(ctx, input.search, categoryId)
+      : { filters: {}, text: '', notes: [] };
+    const categoryFromWords = !categoryId && Boolean(understood.category_id);
+    categoryId = categoryId ?? understood.category_id;
+    let used = await usedKeys(categoryId ? scopeOf(ctx, categoryId) : undefined);
+    /* What the agent passed wins over what was read from the words. */
+    const attributes = { ...understood.filters, ...resolveFilters(ctx, input.filters, used, notes) };
+
+    const base: SearchFilters = {
+      category_id: categoryId,
+      attributes: Object.keys(attributes).length ? attributes : undefined,
       price_min_minor: toPaise(input.price_min),
       price_max_minor: toPaise(input.price_max),
-      sort: (input.sort === 'relevance' && !input.search?.trim() ? undefined : input.sort) as Sort | undefined,
-      page: Math.max(1, Math.floor(input.page ?? 1)),
+      page,
       limit,
     };
-    const res = await productSearchService.search(filters, { viewer: true });
-    const ctx = await context(lang);
+    const sortFor = (text?: string) => (input.sort === 'relevance' && !text ? undefined : input.sort) as Sort | undefined;
+    let text: string | undefined = understood.text || undefined;
+    let res = await productSearchService.search({ ...base, search: text, sort: sortFor(text) }, { viewer: true, allVariantFacets: true });
+    /* Leftover words that match no name: keep the category / filters, drop the words. */
+    if (!res.total && text && (base.category_id || base.attributes)) {
+      notes.push(`No product name contains "${text}", so those words were left out of the search.`);
+      text = undefined;
+      res = await productSearchService.search({ ...base, sort: sortFor(undefined) }, { viewer: true, allVariantFacets: true });
+    }
+    /* A category read from a word ("car" → "Cars") that finds nothing: search everywhere instead. */
+    if (!res.total && categoryFromWords) {
+      notes.push(`Nothing in "${ctx.paths.get(base.category_id!)}" matched, so all categories were searched.`);
+      base.category_id = categoryId = undefined;
+      used = await usedKeys();
+      res = await productSearchService.search({ ...base, search: text, sort: sortFor(text) }, { viewer: true, allVariantFacets: true });
+    }
+    /* Words no product has ("fortuner"): say so, so the agent does not present a near match as the thing asked for. */
+    if (text && res.total) {
+      const missing: string[] = [];
+      for (const w of text.split(' ').slice(0, 5)) {
+        if (w.length > 2 && !(await ProductV2Model.countDocuments({ $text: { $search: w }, status: 'active', is_deleted: false }))) missing.push(w);
+      }
+      if (missing.length) {
+        notes.push(`No product matches "${missing.join(' ')}" — these are the closest matches. Tell the customer we do not have "${missing.join(' ')}" before offering them.`);
+      }
+    }
 
     const ids = res.items.map((p: any) => p.id);
     const items = ids.length
@@ -214,17 +511,25 @@ export const aiCatalogService = {
       const hasTax = hasTaxOf(p, own);
       const from = p.from_price ? resolvePrice({ price: p.from_price }) : null;
       const cardItems = shown.map((i) => itemCard(ctx, p, i, hasTax, availability.get(i.id)));
+      const more = Math.max(0, pool.length - cardItems.length);
       return {
         id: p.id,
-        name: tr(p.name, lang),
+        name: tr(p.name, ctx.lang),
         brand: p.brand || null,
         category: (p.primary_category_id && ctx.paths.get(p.primary_category_id)) || (p.category_ids ?? []).map((c: string) => ctx.paths.get(c)).find(Boolean) || null,
         price_minor: from?.amount_minor ?? null,
         price_text: from ? `${pool.length > 1 ? 'from ' : ''}${priceText(from, p.gst_rate ?? null, hasTax)}` : null,
         ...(from ? {} : { price_note: NOT_PRICED_NOTE }),
         availability: availabilityView(p.availability?.status === 'tracked' ? { ...p.availability, on_hand: p.availability.available, reserved: 0 } : p.availability),
+        /* EVERY option of this product, e.g. { "Tape Size": ["6inch(144mm)"], "Colour": [all 7] }. */
+        options: optionsOf(ctx, p, own),
         items: cardItems,
-        more_items: Math.max(0, pool.length - cardItems.length),
+        ...(more
+          ? {
+              more_items: more,
+              items_note: `${cardItems.length} of ${pool.length} variants shown — every option is listed in "options"; get_product_details gives each variant's price and stock.`,
+            }
+          : {}),
         ...(p.is_bundle ? { bundle: true } : {}),
         image: assetUrl(p.media?.[0]?.url),
       };
@@ -233,14 +538,39 @@ export const aiCatalogService = {
       cards = cards.filter((c: any) => c.items.length && c.items.some((i: { availability: AvailabilityView }) => i.availability.status !== 'out_of_stock'));
     }
 
+    const first = (page - 1) * limit + 1;
+    const last = (page - 1) * limit + res.items.length;
+    const hasMore = page < res.pages;
     return {
+      understood: {
+        category: categoryId ? ctx.paths.get(categoryId) ?? null : null,
+        filters: Object.fromEntries(
+          Object.entries(attributes).map(([k, vs]) => {
+            const f = ctx.fields.get(k);
+            return [f ? fieldName(ctx, f) : k, vs.map((v) => (f ? optionLabel(ctx, f, v) : String(v)))];
+          })
+        ),
+        search_text: text ?? null,
+      },
+      showing: res.total ? `${first}–${last} of ${res.total}` : '0 of 0',
+      has_more: hasMore,
+      ...(hasMore ? { next_page: page + 1 } : {}),
+      message: hasMore
+        ? `More results exist: call search_products again with page ${page + 1} (same inputs) before telling the customer this is everything — or answer "which sizes / colours" from "range".`
+        : res.total
+          ? 'These are all the matches.'
+          : 'Nothing matched. Suggest a broader search, fewer words or another category (list_categories). Do not invent products.',
+      /* Every option across ALL matches (not just this page), with how many products have it. */
+      range: rangeOf(ctx, res.facets as any, used),
       products: cards,
       total: res.total,
       page: res.page,
       pages: res.pages,
-      ...(input.in_stock_only ? { note: 'Out-of-stock items are left out of this page; totals count every match.' } : {}),
+      ...(notes.length ? { notes } : {}),
+      ...(input.in_stock_only ? { stock_note: 'Out-of-stock variants are left out; totals count every match.' } : {}),
     };
   },
+
 
   /** get_product_details: everything a customer may ask about, for up to 20 products. */
   async details(ids: string[], language?: Lang) {
@@ -327,33 +657,45 @@ export const aiCatalogService = {
     };
   },
 
-  /** get_filters: what the agent can filter on, with the options that have products. */
+  /** get_filters: only the attributes products in scope actually use, with real options and counts. */
   async filters(categoryId?: string, language?: Lang) {
-    const lang: Lang = LANGUAGES.includes(language as Lang) ? (language as Lang) : 'en';
-    const ctx = await context(lang);
-    const res = await productSearchService.search({ category_id: categoryId || undefined, limit: 1 }, { viewer: true });
+    const ctx = await context(pickLang(language));
+    const notes: string[] = [];
+    const scopeId = resolveCategory(ctx, categoryId, notes);
+    const used = await usedKeys(scopeId ? scopeOf(ctx, scopeId) : undefined);
+    const res = await productSearchService.search({ category_id: scopeId, limit: 1 }, { viewer: true, allVariantFacets: true });
+    const facets = res.facets as Record<string, { value: unknown; count: number }[]>;
     const filters = [...ctx.fields.values()]
-      .filter((f) => !f.deprecated && (f.filterable || f.variant_forming))
+      .filter((f) => !f.deprecated && used.has(f.key) && (f.filterable || f.variant_forming))
       .map((f) => {
-        const counts = new Map<unknown, number>(((res.facets as any)[f.key] ?? []).map((b: any) => [b.value, b.count]));
-        const base = { key: f.key, name: tr(f.label, lang), type: f.type };
+        const base = { key: f.key, name: fieldName(ctx, f), type: f.type };
         if (f.type === 'enum') {
-          const options = (f.options ?? [])
-            .filter((o: any) => !o.deprecated && (!counts.size || counts.has(o.value)))
-            .map((o: any) => ({ value: o.value, label: tr(o.label, lang), ...(counts.has(o.value) ? { products: counts.get(o.value) } : {}) }));
+          const counts = new Map<unknown, number>((facets[f.key] ?? []).map((b) => [b.value, b.count]));
+          const options = liveOptions(f)
+            .filter((o) => counts.has(o.value))
+            .map((o) => ({ value: o.value, label: tr(o.label, ctx.lang), products: counts.get(o.value) }));
           return { ...base, options };
         }
-        if (f.type === 'number' && f.unit_family) return { ...base, size: true, unit_family: f.unit_family, example: f.unit_family === 'volume' ? '1 l' : f.unit_family === 'weight' ? '500 g' : f.unit_family === 'length' ? '2 m' : '4 pieces' };
+        if (f.type === 'boolean') return { ...base, options: [true, false] };
+        if (f.type === 'number' && f.unit_family) {
+          const example = f.unit_family === 'volume' ? '1 l' : f.unit_family === 'weight' ? '500 g' : f.unit_family === 'length' ? '2 m' : '4 pieces';
+          return { ...base, size: true, unit_family: f.unit_family, example };
+        }
         return { ...base, ...(f.unit ? { unit: f.unit } : {}) };
       })
       .filter((f: any) => f.type !== 'enum' || f.options.length);
     return {
+      scope: scopeId ? ctx.paths.get(scopeId) ?? null : 'All products',
       filters,
       sorts: ['relevance', 'price_asc', 'price_desc', 'newest', 'name', 'size_asc', 'size_desc'],
       products_in_scope: res.total,
-      how_to_use: 'Pass filters to search_products as { "<key>": ["<value>"] } using the option `value`, not the label. Sizes take "1 l" style text.',
+      how_to_use:
+        'Easiest: put the customer\'s words in search_products `search` (e.g. "6 inch brown plain tape" or "diesel suv") — categories, sizes and colours are recognised automatically. ' +
+        'Or pass filters { "<key>": ["<value or label>"] }; labels like "6 inch" or "Brown" also work.',
+      ...(notes.length ? { notes } : {}),
     };
   },
+
 
   /** list_categories: visible categories with their path and number of products on sale. */
   async categories(search?: string, language?: Lang) {

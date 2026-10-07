@@ -1,42 +1,26 @@
-import { Product, Category } from '../types/index.js';
-
 /**
- * Builds the knowledge-base document for the product catalogue.
+ * Builds the knowledge-base document for the product catalogue (product module v2).
  *
- * This runs on the server, not in the browser, for three reasons that matter:
+ * The data is collected by kbCatalog.service (published products and their
+ * active variants, visible categories); this file only turns it into markdown,
+ * so it stays simple and testable.
  *
- *  - the catalogue is already here, so shipping every product to the client
- *    just to have it post text back is a round trip for nothing;
- *  - the client could only ever see one page of products, so a catalogue larger
- *    than its page size silently produced a partial document;
- *  - what is left out is a policy decision, not a formatting one. Price, stock
- *    and margin are excluded here, where a caller cannot opt back in.
+ * Built on the server, as one document:
+ *
+ *  - the catalogue is already here, so shipping it to the browser just to have
+ *    it posted back as text is a round trip for nothing;
+ *  - the browser only ever sees one page, so a large catalogue would silently
+ *    become a partial document;
+ *  - what is left out is policy, not formatting. Price, MRP, tax and stock are
+ *    never written: a knowledge-base file is a snapshot the agent answers from,
+ *    so anything that moves becomes a confident wrong answer. The agent reads
+ *    those live through the MCP tools instead.
  */
 
-/**
- * Fields deliberately kept out of the document.
- *
- * A knowledge-base file is a snapshot Perfox indexes and an agent then answers
- * from, so anything that moves on its own becomes a confident wrong answer the
- * moment it changes. Price and stock change constantly; `margin` and
- * `originalPrice` are internal money that should never reach a customer at all.
- */
-export const EXCLUDED_FIELDS = [
-  'price',
-  'originalPrice',
-  'discount',
-  'margin',
-  'stock',
-  'stockStatus',
-  'committed',
-  'reorderPoint',
-] as const;
-
-/* Said in the document itself, so an agent retrieving it is told not to answer
-   pricing or availability from this text. */
+/* Said in the document itself, so an agent retrieving it knows where prices live. */
 const VOLATILE_NOTE =
-  '> Pricing and availability are not recorded here, because they change. ' +
-  'Check the live product record for current price and stock.';
+  '> Prices, offers and availability are not recorded here, because they change. ' +
+  'Check the live product (the catalogue tools) for the current price and stock.';
 
 export type CatalogTemplate = 'qa' | 'reference';
 
@@ -46,126 +30,37 @@ export interface CatalogOptions {
   template?: CatalogTemplate;
 }
 
-/* Collapses the blank-line runs the optional sections leave behind. */
-const tidy = (lines: string[]): string =>
-  lines
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trimEnd();
+export interface KbProduct {
+  name: string;
+  /** The name in the other languages, when different. */
+  otherNames: string[];
+  brand: string | null;
+  description: string | null;
+  /** Category paths, e.g. "Vehicles › SUV". */
+  categories: string[];
+  /** Product-level attributes with labels, e.g. { name: "Pieces per box", value: "42" }. */
+  attributes: { name: string; value: string }[];
+  /** Every option of the active variants, e.g. { "Tape Size": ["6inch(144mm)"], "Colour": ["Brown", …] }. */
+  options: Record<string, string[]>;
+  /** Active variants: "Petrol · Red" / "Pack of 4" and their SKU. */
+  variants: { label: string; sku: string }[];
+  /** For a bundle: "1 × Oil filter". */
+  bundle: string[];
+  fulfilment: string | null;
+  image: string | null;
+}
 
-/**
- * Pushes every heading in a section down `levels` places.
- *
- * Each section is written as if it were a standalone document starting at `#`.
- * Nested unchanged they would produce many `#` titles in one file, which reads
- * as many documents to anything chunking it.
- */
-const demoteHeadings = (markdown: string, levels: number): string =>
-  markdown.replace(/^(#{1,5}) /gm, (_match, hashes: string) => `${'#'.repeat(hashes.length + levels)} `);
+export interface KbCategory {
+  path: string;
+  description: string | null;
+  /** Names of the published products listed directly in this category. */
+  products: string[];
+}
 
-const imageLines = (p: any): string[] => {
-  const lines: string[] = [];
-  if (p.image) lines.push(`![${p.name}](${p.image})`);
-
-  const gallery = Array.isArray(p.gallery) ? p.gallery : Array.isArray(p.images) ? p.images : [];
-  gallery.forEach((img: any) => {
-    const src = typeof img === 'string' ? img : img?.src;
-    if (!src || src === p.image) return;
-    const label = typeof img === 'string' ? p.name : img?.label ?? p.name;
-    lines.push(`![${label}](${src})`);
-  });
-  return lines;
-};
-
-const videoLines = (p: any): string[] =>
-  (Array.isArray(p.videos) ? p.videos : []).map(
-    (v: any) => `- ${v?.title ?? 'Video'}${v?.duration ? ` (${v.duration})` : ''}`
-  );
-
-/* Variants without their price, stock or status — the choices that exist, which
-   is the durable part. */
-const variantLines = (p: any): string[] =>
-  (Array.isArray(p.variants) ? p.variants : []).map((v: any) => {
-    const label = [v?.option, v?.value].filter(Boolean).join(': ');
-    return `- ${label || 'Variant'}`;
-  });
-
-/** Structured Q&A — phrased as questions, which is what a retrieval agent matches on. */
-const productAsQA = (p: any): string => {
-  const lines: string[] = [`# ${p.name}`, ''];
-  if (p.description) lines.push(p.description, '');
-
-  lines.push(`## What is the SKU for ${p.name}?`, `The SKU is \`${p.sku || 'not set'}\`.`);
-  lines.push(
-    '',
-    `## What category does ${p.name} belong to?`,
-    `${p.category || 'Uncategorised'}${p.categoryCode ? ` (${p.categoryCode})` : ''}.`
-  );
-
-  if (p.shortName && p.shortName !== p.name) {
-    lines.push('', `## Is ${p.name} known by another name?`, `It is also listed as "${p.shortName}".`);
-  }
-  if (p.brand) lines.push('', `## Who makes ${p.name}?`, `${p.brand}.`);
-  if (Array.isArray(p.tags) && p.tags.length) {
-    lines.push('', `## What is ${p.name} related to?`, ...p.tags.map((tag: string) => `- ${tag}`));
-  }
-
-  const variants = variantLines(p);
-  if (variants.length) lines.push('', `## What variants of ${p.name} are available?`, ...variants);
-
-  const images = imageLines(p);
-  if (images.length) lines.push('', `## What does ${p.name} look like?`, ...images);
-
-  const videos = videoLines(p);
-  if (videos.length) lines.push('', `## Are there videos of ${p.name}?`, ...videos);
-
-  return tidy(lines);
-};
-
-/** Reference sheet — a flat fact table rather than questions. */
-const productAsReference = (p: any): string => {
-  const rows = [
-    `| SKU | ${p.sku || '—'} |`,
-    `| Category | ${p.category || '—'}${p.categoryCode ? ` (${p.categoryCode})` : ''} |`,
-    p.shortName && p.shortName !== p.name ? `| Also listed as | ${p.shortName} |` : '',
-    p.brand ? `| Brand | ${p.brand} |` : '',
-    Array.isArray(p.tags) && p.tags.length ? `| Tags | ${p.tags.join(', ')} |` : '',
-  ].filter(Boolean);
-
-  const lines: string[] = [`# ${p.name}`, ''];
-  if (p.description) lines.push(p.description, '');
-  lines.push('| Field | Value |', '| --- | --- |', ...rows);
-
-  const variants = variantLines(p);
-  if (variants.length) lines.push('', '## Variants', '', ...variants);
-
-  const images = imageLines(p);
-  if (images.length) lines.push('', '## Images', '', ...images);
-
-  const videos = videoLines(p);
-  if (videos.length) lines.push('', '## Videos', '', ...videos);
-
-  return tidy(lines);
-};
-
-const categoryAsMarkdown = (c: any, template: CatalogTemplate): string => {
-  const count = c.productsCount ?? 0;
-  const lines: string[] = [`# ${c.name}`, ''];
-  if (c.description) lines.push(c.description, '');
-
-  if (template === 'qa') {
-    lines.push(
-      `## What is in the ${c.name} category?`,
-      `${count} product(s) are listed under ${c.name}.`,
-      '',
-      `## How is ${c.name} identified?`,
-      `Category code \`${c.id}\`.`
-    );
-  } else {
-    lines.push('| Field | Value |', '| --- | --- |', `| Code | ${c.id} |`, `| Products | ${count} |`);
-  }
-  return tidy(lines);
-};
+export interface CatalogInput {
+  products: KbProduct[];
+  categories: KbCategory[];
+}
 
 export interface CatalogDocument {
   name: string;
@@ -174,46 +69,156 @@ export interface CatalogDocument {
   categoryCount: number;
 }
 
+const FULFILMENT_TEXT: Record<string, string> = {
+  service: 'It is a service.',
+  rental: 'It is available for rent.',
+  digital: 'It is delivered digitally.',
+};
+
+/* Collapses the blank-line runs the optional sections leave behind. */
+const tidy = (lines: string[]): string =>
+  lines
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trimEnd();
+
 /**
- * One document covering the whole catalogue.
+ * Pushes every heading in a section down `levels` places, so each product,
+ * written as if it started at `#`, nests under the document's own headings
+ * instead of reading as many separate documents.
+ */
+const demoteHeadings = (markdown: string, levels: number): string =>
+  markdown.replace(/^(#{1,5}) /gm, (_match, hashes: string) => `${'#'.repeat(hashes.length + levels)} `);
+
+/* A value inside a markdown table cell. */
+const cell = (text: string) => text.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+
+const optionLines = (p: KbProduct) => Object.entries(p.options).map(([name, values]) => `- ${name}: ${values.join(', ')}`);
+/* Plain ASCII separators: a non-ASCII dash or dot turns into "â€”" when an indexer guesses the wrong encoding. */
+const variantLines = (p: KbProduct) => p.variants.map((v) => `- ${v.label} - SKU \`${v.sku}\``);
+const listNames = (names: string[]) => names.join(', ');
+
+/**
+ * Overview: every product with its category, and for each option which
+ * products have it ("Engine: Electric — Tata Nexon, Tata Tiago").
+ *
+ * Retrieval returns only a few chunks, so a question about the whole range
+ * ("what SUVs / electric cars do you have?") must find its full answer in ONE
+ * place — not spread across a dozen product sections.
+ */
+const overview = (products: KbProduct[], template: CatalogTemplate): string => {
+  const index = new Map<string, Map<string, string[]>>();
+  for (const p of products) {
+    for (const [option, values] of Object.entries(p.options)) {
+      const byValue = index.get(option) ?? new Map<string, string[]>();
+      for (const v of values) byValue.set(v, [...(byValue.get(v) ?? []), p.name]);
+      index.set(option, byValue);
+    }
+  }
+
+  const lines: string[] = [];
+  const all = products.map((p) => `- ${p.name}${p.categories.length ? ` (${p.categories.join('; ')})` : ''}`);
+  if (template === 'qa') {
+    lines.push(`# What products do you have?`, `${products.length} product(s) are available:`, ...all);
+    for (const [option, byValue] of index) {
+      lines.push('', `# Which products are available by ${option}?`);
+      for (const [value, names] of byValue) lines.push(`- ${option} ${value}: ${listNames(names)}`);
+    }
+  } else {
+    lines.push('# All products', '', ...all);
+    for (const [option, byValue] of index) {
+      lines.push('', `# By ${option}`, '', '| Option | Products |', '| --- | --- |');
+      for (const [value, names] of byValue) lines.push(`| ${cell(value)} | ${cell(listNames(names))} |`);
+    }
+  }
+  return tidy(lines);
+};
+
+/** Structured Q&A — phrased as questions, which is what a retrieval agent matches on. */
+const productAsQA = (p: KbProduct): string => {
+  const lines: string[] = [`# ${p.name}`, ''];
+  if (p.description) lines.push(p.description, '');
+
+  lines.push(`## Which category is ${p.name} in?`, p.categories.length ? p.categories.join('; ') + '.' : 'It is not in a category.');
+  if (p.otherNames.length) lines.push('', `## Is ${p.name} known by another name?`, `It is also listed as ${p.otherNames.map((n) => `"${n}"`).join(', ')}.`);
+  if (p.brand) lines.push('', `## Who makes ${p.name}?`, `${p.brand}.`);
+  if (p.fulfilment && FULFILMENT_TEXT[p.fulfilment]) lines.push('', `## How is ${p.name} provided?`, FULFILMENT_TEXT[p.fulfilment]);
+
+  const options = optionLines(p);
+  if (options.length) lines.push('', `## What options does ${p.name} come in?`, ...options);
+  if (p.attributes.length) lines.push('', `## What are the details of ${p.name}?`, ...p.attributes.map((a) => `- ${a.name}: ${a.value}`));
+  if (p.bundle.length) lines.push('', `## What is included in ${p.name}?`, ...p.bundle.map((b) => `- ${b}`));
+
+  lines.push('', `## Which variants of ${p.name} are available?`, ...variantLines(p));
+  if (p.image) lines.push('', `## What does ${p.name} look like?`, `![${p.name}](${p.image})`);
+  return tidy(lines);
+};
+
+/** Reference sheet — a fact table and a variant table. */
+const productAsReference = (p: KbProduct): string => {
+  const rows = [
+    `| Category | ${cell(p.categories.join('; ') || '—')} |`,
+    p.otherNames.length ? `| Also listed as | ${cell(p.otherNames.join(', '))} |` : '',
+    p.brand ? `| Brand | ${cell(p.brand)} |` : '',
+    p.fulfilment && FULFILMENT_TEXT[p.fulfilment] ? `| Provided as | ${cell(p.fulfilment)} |` : '',
+    ...Object.entries(p.options).map(([name, values]) => `| ${cell(name)} | ${cell(values.join(', '))} |`),
+    ...p.attributes.map((a) => `| ${cell(a.name)} | ${cell(a.value)} |`),
+  ].filter(Boolean);
+
+  const lines: string[] = [`# ${p.name}`, ''];
+  if (p.description) lines.push(p.description, '');
+  lines.push('| Field | Value |', '| --- | --- |', ...rows);
+  if (p.bundle.length) lines.push('', '## Included', '', ...p.bundle.map((b) => `- ${b}`));
+  lines.push('', '## Variants', '', '| Variant | SKU |', '| --- | --- |', ...p.variants.map((v) => `| ${cell(v.label)} | \`${cell(v.sku)}\` |`));
+  if (p.image) lines.push('', '## Image', '', `![${p.name}](${p.image})`);
+  return tidy(lines);
+};
+
+/* The category's own product names, so "what SUVs do you have?" is answered in one chunk. */
+const categoryAsMarkdown = (c: KbCategory, template: CatalogTemplate): string => {
+  const lines: string[] = [`# ${c.path}`, ''];
+  if (c.description) lines.push(c.description, '');
+  const names = c.products.length ? listNames(c.products) : 'none yet';
+  if (template === 'qa') {
+    lines.push(`## Which products are in the ${c.path} category?`, `${c.path} has ${c.products.length} product(s): ${names}.`);
+  } else {
+    lines.push('| Field | Value |', '| --- | --- |', `| Products (${c.products.length}) | ${cell(names)} |`);
+  }
+  return tidy(lines);
+};
+
+/**
+ * One document covering the whole published catalogue.
  *
  * A file per product meant an upload per row, a row per product to scan in the
  * knowledge base, and a separate thing to delete whenever the catalogue moved.
  */
-export const buildCatalogDocument = (
-  products: Product[],
-  categories: Category[],
-  options: CatalogOptions = {}
-): CatalogDocument => {
+export const buildCatalogDocument = (input: CatalogInput, options: CatalogOptions = {}): CatalogDocument => {
   const includeProducts = options.includeProducts ?? true;
   const includeCategories = options.includeCategories ?? true;
   const template: CatalogTemplate = options.template ?? 'qa';
 
-  const usedProducts = includeProducts ? products : [];
-  const usedCategories = includeCategories ? categories : [];
+  const products = includeProducts ? input.products : [];
+  const categories = includeCategories ? input.categories : [];
 
   /* Stated once, at the top — each section would otherwise repeat it. */
   const sections: string[] = ['# Product Catalog', '', VOLATILE_NOTE, ''];
 
-  if (usedProducts.length) {
-    sections.push('## Products', '');
-    usedProducts.forEach((p) => {
-      const markdown = template === 'qa' ? productAsQA(p) : productAsReference(p);
-      sections.push(demoteHeadings(markdown, 2), '');
-    });
-  }
-
-  if (usedCategories.length) {
+  /* Whole-range answers first (overview, categories), then one section per product. */
+  if (products.length) sections.push('## Overview', '', demoteHeadings(overview(products, template), 2), '');
+  if (categories.length) {
     sections.push('## Categories', '');
-    usedCategories.forEach((c) => {
-      sections.push(demoteHeadings(categoryAsMarkdown(c, template), 2), '');
-    });
+    categories.forEach((c) => sections.push(demoteHeadings(categoryAsMarkdown(c, template), 2), ''));
+  }
+  if (products.length) {
+    sections.push('## Products', '');
+    products.forEach((p) => sections.push(demoteHeadings(template === 'qa' ? productAsQA(p) : productAsReference(p), 2), ''));
   }
 
   return {
     name: 'product-catalog.md',
     content: tidy(sections),
-    productCount: usedProducts.length,
-    categoryCount: usedCategories.length,
+    productCount: products.length,
+    categoryCount: categories.length,
   };
 };
