@@ -113,16 +113,79 @@ const attrClause = (key: string, values: unknown[]) => ({
   ],
 });
 
-const SORT_STAGES: Record<Sort, any[]> = {
-  /* The score is copied into a field before $facet, where $meta is not available. */
-  relevance: [{ $sort: { score: -1, created_at: -1 } }],
-  price_asc: [{ $addFields: { _unpriced: { $cond: [{ $eq: [{ $ifNull: ['$min_price_minor', null] }, null] }, 1, 0] } } }, { $sort: { _unpriced: 1, min_price_minor: 1, created_at: -1 } }],
-  price_desc: [{ $addFields: { _unpriced: { $cond: [{ $eq: [{ $ifNull: ['$min_price_minor', null] }, null] }, 1, 0] } } }, { $sort: { _unpriced: 1, min_price_minor: -1, created_at: -1 } }],
-  name: [{ $addFields: { _name: { $toLower: '$name.en' } } }, { $sort: { _name: 1, created_at: -1 } }],
-  newest: [{ $sort: { created_at: -1, _id: -1 } }],
-  /* By the smallest matching size; products without a size go last. */
-  size_asc: [{ $addFields: { _nosize: { $cond: [{ $eq: [{ $ifNull: ['$_size', null] }, null] }, 1, 0] } } }, { $sort: { _nosize: 1, _size: 1, created_at: -1 } }],
-  size_desc: [{ $addFields: { _nosize: { $cond: [{ $eq: [{ $ifNull: ['$_size', null] }, null] }, 1, 0] } } }, { $sort: { _nosize: 1, _size: -1, created_at: -1 } }],
+/* `priceField` is min_price_minor, or _match_price when attribute filters are set (G1). */
+const sortStages = (sort: Sort, priceField: string): any[] => {
+  const unpriced = { $addFields: { _unpriced: { $cond: [{ $eq: [{ $ifNull: [`$${priceField}`, null] }, null] }, 1, 0] } } };
+  switch (sort) {
+    /* The score is copied into a field before $facet, where $meta is not available. */
+    case 'relevance':
+      return [{ $sort: { score: -1, created_at: -1 } }];
+    case 'price_asc':
+      return [unpriced, { $sort: { _unpriced: 1, [priceField]: 1, created_at: -1 } }];
+    case 'price_desc':
+      return [unpriced, { $sort: { _unpriced: 1, [priceField]: -1, created_at: -1 } }];
+    case 'name':
+      return [{ $addFields: { _name: { $toLower: '$name.en' } } }, { $sort: { _name: 1, created_at: -1 } }];
+    /* By the smallest matching size; products without a size go last. */
+    case 'size_asc':
+      return [{ $addFields: { _nosize: { $cond: [{ $eq: [{ $ifNull: ['$_size', null] }, null] }, 1, 0] } } }, { $sort: { _nosize: 1, _size: 1, created_at: -1 } }];
+    case 'size_desc':
+      return [{ $addFields: { _nosize: { $cond: [{ $eq: [{ $ifNull: ['$_size', null] }, null] }, 1, 0] } } }, { $sort: { _nosize: 1, _size: -1, created_at: -1 } }];
+    default:
+      return [{ $sort: { created_at: -1, _id: -1 } }];
+  }
+};
+
+/* True when `input` (a list of { key, value }) has `key` with one of `values`. */
+const hasValue = (input: string, key: string, values: unknown[]) => ({
+  $gt: [
+    {
+      $size: {
+        $filter: {
+          input: { $ifNull: [input, []] },
+          as: 'a',
+          cond: { $and: [{ $eq: ['$$a.key', key] }, { $in: ['$$a.value', { $literal: values }] }] },
+        },
+      },
+    },
+    0,
+  ],
+});
+
+/**
+ * G1 / G3 (design §9.5): with attribute filters, the ACTIVE items that match
+ * them all — a value on the product itself counts for every item. `_match_price`
+ * is the cheapest matching normal item (packs only when no normal item is priced),
+ * so "cheapest red XL" sorts and prices by the red XL, not by a blue S.
+ */
+const matchItemsStages = (filters: { key: string; values: unknown[] }[]) => {
+  const priceOf = (list: unknown) => ({ $min: { $map: { input: list, as: 'm', in: '$$m.price.amount_minor' } } });
+  return [
+    {
+      $addFields: {
+        _match: {
+          $filter: {
+            input: { $ifNull: ['$_filter_items', []] },
+            as: 'i',
+            cond: {
+              $and: [
+                { $eq: ['$$i.status', 'active'] },
+                ...filters.map((f) => ({ $or: [hasValue('$attributes', f.key, f.values), hasValue('$$i.attributes', f.key, f.values)] })),
+              ],
+            },
+          },
+        },
+      },
+    },
+    {
+      $addFields: {
+        _match_ids: { $map: { input: '$_match', as: 'm', in: '$$m.id' } },
+        _match_price: {
+          $ifNull: [priceOf({ $filter: { input: '$_match', as: 'm', cond: { $eq: [{ $ifNull: ['$$m.pack_of', null] }, null] } } }), priceOf('$_match')],
+        },
+      },
+    },
+  ];
 };
 
 /**
@@ -144,9 +207,11 @@ const sizeStage = (key: string | undefined, min: number | undefined, max: number
 
 /** The list-card shape: product fields plus price and availability summaries. */
 const toSummary = (doc: any, bundleAvailability?: Map<string, Availability>) => {
-  const { _id, _filter_items, _page_items, _stock, _unpriced, _name, _size, _nosize, score, ...p } = doc;
+  const { _id, _filter_items, _page_items, _stock, _unpriced, _name, _size, _nosize, score, _match, _match_ids, _match_price, ...p } = doc;
   const items: any[] = _page_items ?? [];
-  const active = items.filter((i) => i.status === 'active');
+  /* With attribute filters, price and availability follow the matching items only (G1, G3). */
+  const matched: Set<string> | null = Array.isArray(_match_ids) ? new Set(_match_ids) : null;
+  const active = items.filter((i) => i.status === 'active' && (!matched || matched.has(i.id)));
   const cheapest = (list: any[]) =>
     list
       .map((i) => resolvePrice(i))
@@ -162,7 +227,8 @@ const toSummary = (doc: any, bundleAvailability?: Map<string, Availability>) => 
   return {
     ...p,
     item_count: items.length,
-    active_item_count: active.length,
+    active_item_count: items.filter((i) => i.status === 'active').length,
+    ...(matched ? { matching_item_ids: [..._match_ids] } : {}),
     from_price: priced[0] ?? null,
     /* A bundle's stock is its components' (Phase 4). */
     availability:
@@ -198,12 +264,6 @@ export const productSearchService = {
     else if (filters.status && filters.status !== 'all' && filters.status !== 'deleted') first.status = filters.status;
     if (filters.brand?.trim()) first.brand = { $regex: `^${escapeRegex(filters.brand.trim())}$`, $options: 'i' };
     if (filters.category_id) first.category_ids = { $in: await withDescendants(filters.category_id) };
-    if (filters.price_min_minor !== undefined || filters.price_max_minor !== undefined) {
-      first.min_price_minor = {
-        ...(filters.price_min_minor !== undefined ? { $gte: filters.price_min_minor } : {}),
-        ...(filters.price_max_minor !== undefined ? { $lte: filters.price_max_minor } : {}),
-      };
-    }
 
     const attrFilters = Object.entries(filters.attributes ?? {})
       .filter(([, v]) => v?.length)
@@ -212,6 +272,17 @@ export const productSearchService = {
         if (!f) throw invalid(`Unknown attribute "${key}"`, `attributes.${key}`);
         return { key, values: valuesFor(f, raw, key) };
       });
+
+    /* With attribute filters the price range and price sort use the matching items' price (G1). */
+    const priceField = attrFilters.length ? '_match_price' : 'min_price_minor';
+    const priceRange =
+      filters.price_min_minor !== undefined || filters.price_max_minor !== undefined
+        ? {
+            ...(filters.price_min_minor !== undefined ? { $gte: filters.price_min_minor } : {}),
+            ...(filters.price_max_minor !== undefined ? { $lte: filters.price_max_minor } : {}),
+          }
+        : null;
+    if (priceRange && !attrFilters.length) first.min_price_minor = priceRange;
     /* Size range (R46): needs the measured-size attribute, so the unit family is known. */
     const ranged = filters.measure_min !== undefined || filters.measure_max !== undefined;
     if (filters.measure_key) {
@@ -248,10 +319,15 @@ export const productSearchService = {
         $lookup: {
           from: 'product_items',
           let: { pid: '$id' },
-          pipeline: [{ $match: { $expr: { $eq: ['$product_id', '$$pid'] }, is_deleted: false } }, { $project: { _id: 0, attributes: 1, measure: 1 } }],
+          pipeline: [
+            { $match: { $expr: { $eq: ['$product_id', '$$pid'] }, is_deleted: false } },
+            { $project: { _id: 0, id: 1, status: 1, pack_of: 1, price: 1, attributes: 1, measure: 1 } },
+          ],
           as: '_filter_items',
         },
       },
+      ...(attrFilters.length ? matchItemsStages(attrFilters) : []),
+      ...(attrFilters.length && priceRange ? [{ $match: { _match_price: priceRange } }] : []),
       ...(sized ? [sizeStage(filters.measure_key, filters.measure_min, filters.measure_max)] : []),
       ...(ranged ? [{ $match: { _size: { $ne: null } } }] : []),
       ...(sort === 'relevance' ? [{ $addFields: { score: { $meta: 'textScore' } } }] : []),
@@ -259,7 +335,7 @@ export const productSearchService = {
         $facet: {
           results: [
             matchExcept(),
-            ...SORT_STAGES[sort],
+            ...sortStages(sort, priceField),
             { $skip: (page - 1) * limit },
             { $limit: limit },
             {

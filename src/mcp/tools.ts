@@ -7,6 +7,7 @@ import {
 } from '../services/publicCatalog.js';
 import { createLogger } from '../utils/logger.js';
 import type { Product, Category } from '../types/index.js';
+import { catalogV2Tools } from './catalogV2.tools.js';
 
 /**
  * MCP CATALOGUE TOOLS.
@@ -33,7 +34,8 @@ export interface McpTool {
 
 const MAX_BATCH = 100;
 
-export const mcpTools: Record<string, McpTool> = {
+/** The old catalogue (v1). Served only with MCP_CATALOG=v1 until the Phase 5 data move. */
+export const catalogV1Tools: Record<string, McpTool> = {
   list_products: {
     description:
       'Browse the product catalogue. Use this whenever the customer asks what is available, ' +
@@ -216,6 +218,14 @@ export const mcpTools: Record<string, McpTool> = {
     },
   },
 };
+
+/**
+ * Which catalogue the agent sees: the new product module (v2, default) or the
+ * old one (MCP_CATALOG=v1), kept as a switch until the Phase 5 data move.
+ */
+export const mcpCatalogVersion = (): 'v1' | 'v2' => (process.env.MCP_CATALOG?.trim().toLowerCase() === 'v1' ? 'v1' : 'v2');
+
+export const mcpTools: Record<string, McpTool> = mcpCatalogVersion() === 'v1' ? catalogV1Tools : catalogV2Tools;
 
 export const toolDeclarations = () =>
   Object.entries(mcpTools).map(([name, tool]) => ({

@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { mcpTools, toolDeclarations } from '../mcp/tools.js';
+import { mcpCatalogVersion, mcpTools, toolDeclarations } from '../mcp/tools.js';
 import { createLogger } from '../utils/logger.js';
 
 /**
@@ -59,7 +59,7 @@ router.post('/', requireMcpToken, async (req: Request, res: Response) => {
         result: {
           protocolVersion: '2024-11-05',
           capabilities: { tools: {} },
-          serverInfo: { name: 'omniflow-catalog-mcp', version: '1.0.0' },
+          serverInfo: { name: 'omniflow-catalog-mcp', version: mcpCatalogVersion() === 'v2' ? '2.0.0' : '1.0.0' },
         },
       });
     }
@@ -95,6 +95,7 @@ router.get('/health', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
     service: 'omniflow-catalog-mcp',
+    catalog: mcpCatalogVersion(),
     tools: Object.keys(mcpTools),
     secured: Boolean(process.env.MCP_TOKEN?.trim()),
     timestamp: new Date().toISOString(),

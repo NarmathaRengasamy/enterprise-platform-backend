@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { validateRequest } from '../middlewares/validate.js';
 import { queryCatalog, queryCategories } from '../services/publicCatalog.js';
+import { aiCatalogService, LANGUAGES, MAX_AVAILABILITY_IDS, MAX_DETAIL_IDS } from '../services/aiCatalog.service.js';
 import { getPublicSiteSettings } from '../controllers/settings.controller.js';
 import { toAppError } from '../utils/error.util.js';
 import { AppError } from '../middlewares/errorHandler.js';
@@ -136,6 +137,75 @@ router.post(
     }
   }
 );
+
+/* ---------------------------------------------- v2: new product module */
+
+/*
+ * The storefront on the new product module (design §9.5). Same shapes the AI
+ * agent gets over MCP (aiCatalogService): active products and items only,
+ * prices and availability as ready-made text plus the paise figure, exact
+ * stock only when low. The v1 routes above stay until the Phase 5 data move.
+ */
+
+const language = z.enum(LANGUAGES).optional();
+const attributeValue = z.union([z.string().max(200), z.number(), z.boolean()]);
+
+export const publicV2SearchSchema = z.object({
+  body: z.object({
+    search: z.string().trim().max(200).optional(),
+    category_id: z.string().trim().max(100).optional(),
+    filters: z.record(z.array(attributeValue).max(50)).optional(),
+    price_min: z.number().nonnegative().optional(),
+    price_max: z.number().nonnegative().optional(),
+    in_stock_only: z.boolean().optional(),
+    sort: z.enum(['relevance', 'price_asc', 'price_desc', 'newest', 'name', 'size_asc', 'size_desc']).optional(),
+    page: z.number().int().min(1).optional(),
+    limit: z.number().int().min(1).max(50).optional(),
+    language,
+  }),
+});
+
+export const publicV2DetailsSchema = z.object({
+  body: z.object({ ids: z.array(z.string().trim().min(1)).min(1).max(MAX_DETAIL_IDS), language }),
+});
+
+export const publicV2FiltersSchema = z.object({
+  body: z.object({ category_id: z.string().trim().max(100).optional(), language }),
+});
+
+export const publicV2CategoriesSchema = z.object({
+  body: z.object({ search: z.string().trim().max(200).optional(), language }),
+});
+
+export const publicV2AvailabilitySchema = z.object({
+  body: z.object({ item_ids: z.array(z.string().trim().min(1)).min(1).max(MAX_AVAILABILITY_IDS) }),
+});
+
+const v2 = (schema: z.AnyZodObject, run: (body: any) => Promise<unknown>, failure: string) => [
+  validateRequest(schema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      res.status(200).json(ok(await run(req.body)));
+    } catch (error) {
+      next(toAppError(error, failure, log));
+    }
+  },
+];
+
+/** POST /public/v2/products — search: compact cards with up to 3 matching items each. */
+router.post('/v2/products', ...v2(publicV2SearchSchema, (b) => aiCatalogService.search(b), 'Could not load the catalogue'));
+
+/** POST /public/v2/products/details — full details for up to 20 products. */
+router.post('/v2/products/details', ...v2(publicV2DetailsSchema, (b) => aiCatalogService.details(b.ids, b.language), 'Could not load the products'));
+
+/** POST /public/v2/filters — filterable attributes, their options and the sorts. */
+router.post('/v2/filters', ...v2(publicV2FiltersSchema, (b) => aiCatalogService.filters(b.category_id, b.language), 'Could not load the filters'));
+
+/** POST /public/v2/categories — visible categories with paths and product counts. */
+router.post('/v2/categories', ...v2(publicV2CategoriesSchema, (b) => aiCatalogService.categories(b.search, b.language), 'Could not load the categories'));
+
+/** POST /public/v2/availability — live availability for up to 50 items. */
+router.post('/v2/availability', ...v2(publicV2AvailabilitySchema, (b) => aiCatalogService.availability(b.item_ids), 'Could not load availability'));
 
 /* ------------------------------------------------------------- settings */
 
