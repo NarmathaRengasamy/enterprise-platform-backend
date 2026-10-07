@@ -229,7 +229,9 @@ export const aiCatalogService = {
         image: assetUrl(p.media?.[0]?.url),
       };
     });
-    if (input.in_stock_only) cards = cards.filter((c) => c.items.length && c.items.some((i) => i.availability.status !== 'out_of_stock'));
+    if (input.in_stock_only) {
+      cards = cards.filter((c: any) => c.items.length && c.items.some((i: { availability: AvailabilityView }) => i.availability.status !== 'out_of_stock'));
+    }
 
     return {
       products: cards,
