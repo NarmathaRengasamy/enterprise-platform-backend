@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { store } from '../data/store.js';
 import { AppError } from '../middlewares/errorHandler.js';
+import { AuthenticatedRequest } from '../middlewares/auth.js';
 import { randomBytes } from 'crypto';
 import { createLogger } from '../utils/logger.js';
 import { toAppError } from '../utils/error.util.js';
@@ -226,6 +227,28 @@ export const revokeTeamMember = async (
 ): Promise<void> => {
   try {
     const { id } = req.params;
+    const authReq = req as AuthenticatedRequest;
+
+    /* Prevent an admin from revoking or deleting their own account */
+    if (authReq.user?.userId === id) {
+      throw new AppError('You cannot delete or revoke your own account', 400);
+    }
+
+    const existing = await store.getUserById(id);
+    if (!existing) {
+      throw new AppError('Team member not found', 404);
+    }
+
+    /* Prevent deleting or revoking the last remaining active Admin */
+    if (existing.role === 'Admin') {
+      const roster = await store.getUsers();
+      const otherActiveAdmins = roster.filter(
+        (u) => u.role === 'Admin' && u.status !== 'Inactive' && u.id !== id
+      );
+      if (otherActiveAdmins.length === 0) {
+        throw new AppError('Cannot delete or revoke the last active administrator', 400);
+      }
+    }
 
     /* Deactivates rather than deleting, so audit history and authored records
        keep pointing at a real user. ?hard=true removes the row outright. */
