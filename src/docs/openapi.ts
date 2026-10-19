@@ -539,6 +539,7 @@ const paths: Record<string, unknown> = {
           })
         ),
         401: errorResponse('Bad credentials', 'Invalid email or password credentials'),
+        403: errorResponse('Account revoked', 'Your account access has been revoked. Please contact an administrator.'),
         422: errorResponse('Validation failed', 'Validation failed'),
       },
     },
