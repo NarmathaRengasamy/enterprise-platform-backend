@@ -1136,7 +1136,7 @@ const paths: Record<string, unknown> = {
         404: errorResponse('Missing folder', 'That folder no longer exists in Perfox'),
         409: errorResponse(
           'Folder not empty',
-          'This folder still contains 3 files. Delete its contents first — deleting a folder never removes what is inside it.'
+          'This folder still contains 3 files. Please delete its contents before deleting the folder.'
         ),
         ...COMMON_ERRORS,
       },
