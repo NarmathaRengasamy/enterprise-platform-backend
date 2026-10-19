@@ -351,9 +351,9 @@ export const deleteFolder = async (req: Request, res: Response, next: NextFuncti
         const parts: string[] = [];
         if (files) parts.push(`${files} file${files === 1 ? '' : 's'}`);
         if (subfolders) parts.push(`${subfolders} subfolder${subfolders === 1 ? '' : 's'}`);
+        const contents = parts.length ? parts.join(' and ') : 'files';
         throw new AppError(
-          `This folder still contains ${parts.join(' and ')}. Delete its contents first — ` +
-            `deleting a folder never removes what is inside it.`,
+          `This folder still contains ${contents}. Please delete its contents before deleting the folder.`,
           409
         );
       }
