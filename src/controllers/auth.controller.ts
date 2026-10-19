@@ -69,6 +69,11 @@ export const login = async (
       throw new AppError('Invalid email or password credentials', 401);
     }
 
+    if (user.status === 'Inactive') {
+      log.warn(`Login rejected: account for ${email} is inactive/revoked`);
+      throw new AppError('Your account access has been revoked. Please contact an administrator.', 403);
+    }
+
     const payload: AuthTokenPayload = {
       userId: user.id,
       email: user.email,
@@ -175,6 +180,10 @@ export const getCurrentUser = async (
     const user = await store.getUserById(req.user.userId);
     if (!user) {
       throw new AppError('User not found', 404);
+    }
+
+    if (user.status === 'Inactive') {
+      throw new AppError('Your account access has been revoked. Please contact an administrator.', 401);
     }
 
     res.status(200).json({

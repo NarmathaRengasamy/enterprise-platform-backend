@@ -41,6 +41,9 @@ export const authenticateJWT = async (
     if (!user) {
       throw new AppError('User belonging to this token no longer exists', 401);
     }
+    if (user.status === 'Inactive') {
+      throw new AppError('Your account access has been revoked. Please contact an administrator.', 401);
+    }
   } catch (err: any) {
     if (err instanceof AppError) {
       return next(err);
