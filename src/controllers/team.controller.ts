@@ -1,5 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
+import jwt from 'jsonwebtoken';
+import { config } from '../config/index.js';
 import { store } from '../data/store.js';
 import { AppError } from '../middlewares/errorHandler.js';
 import { AuthenticatedRequest } from '../middlewares/auth.js';
@@ -194,25 +196,52 @@ export const updateTeamMember = async (
   try {
     const { id } = req.params;
     const updates = req.body;
+    const authReq = req as AuthenticatedRequest;
 
     const existing = await store.getUserById(id);
     if (!existing) {
       throw new AppError('Team member not found', 404);
     }
 
+    /* Prevent demoting the last remaining active Admin */
+    if (existing.role === 'Admin' && updates.role && updates.role !== 'Admin') {
+      const roster = await store.getUsers();
+      const otherActiveAdmins = roster.filter(
+        (u) => u.role === 'Admin' && u.status !== 'Inactive' && u.id !== id
+      );
+      if (otherActiveAdmins.length === 0) {
+        throw new AppError('Cannot change the role of the last active administrator', 400);
+      }
+    }
+
     const updated = await store.updateUser(id, updates);
+    if (!updated) {
+      throw new AppError('Team member not found', 404);
+    }
+
+    /* If the current authenticated user updated their own record, provide a freshly signed JWT */
+    const isSelf = authReq.user?.userId === id;
+    let freshToken: string | undefined;
+    if (isSelf) {
+      freshToken = jwt.sign(
+        { userId: updated.id, email: updated.email, role: updated.role },
+        config.jwtSecret,
+        { expiresIn: config.jwtExpiresIn as any }
+      );
+    }
 
     res.status(200).json({
       success: true,
       message: 'Team member updated successfully',
       data: {
-        id: updated?.id,
-        name: updated?.name,
-        email: updated?.email,
-        department: updated?.department,
-        role: updated?.role,
-        status: updated?.status,
-        avatar: updated?.avatar,
+        id: updated.id,
+        name: updated.name,
+        email: updated.email,
+        department: updated.department,
+        role: updated.role,
+        status: updated.status,
+        avatar: updated.avatar,
+        token: freshToken,
       },
     });
   } catch (error) {

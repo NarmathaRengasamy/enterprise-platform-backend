@@ -57,4 +57,27 @@ describe('authenticateJWT', () => {
     const res = await request(app).get('/api/health');
     expect(res.status).toBe(200);
   });
+
+  it('immediately reflects updated database role even if token claims an older role', async () => {
+    // Token says Admin, but database record says Viewer
+    vi.spyOn(store, 'getUserById').mockResolvedValue({
+      id: USERS.Admin.id,
+      name: 'Admin User',
+      email: USERS.Admin.email,
+      role: 'Viewer',
+      status: 'Active',
+      department: 'Operations',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    } as any);
+
+    // Calling an Admin-only route (/api/v1/team/members/:id)
+    const res = await request(app)
+      .put(`/api/v1/team/members/${USERS.Editor.id}`)
+      .set(bearer('Admin'))
+      .send({ role: 'Viewer' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.message).toMatch(/do not have permission/);
+  });
 });

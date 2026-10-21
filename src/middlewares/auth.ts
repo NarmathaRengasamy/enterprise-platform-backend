@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { config } from '../config/index.js';
-import { AuthTokenPayload, Role } from '../types/index.js';
+import { AuthTokenPayload, Role, User } from '../types/index.js';
 import { AppError } from './errorHandler.js';
 import { store } from '../data/store.js';
 import { runWithRequestContext } from '../utils/request-context.js';
@@ -34,10 +34,11 @@ export const authenticateJWT = async (
   const token = authHeader.split(' ')[1];
 
   let decoded: AuthTokenPayload;
+  let user: User | undefined;
   try {
     decoded = jwt.verify(token, config.jwtSecret) as AuthTokenPayload;
 
-    const user = await store.getUserById(decoded.userId);
+    user = await store.getUserById(decoded.userId);
     if (!user) {
       throw new AppError('User belonging to this token no longer exists', 401);
     }
@@ -54,10 +55,16 @@ export const authenticateJWT = async (
     return next(new AppError('Invalid authentication token', 401));
   }
 
-  req.user = decoded;
+  /* The user's active role from the store overrides any stale role in the JWT payload,
+     ensuring that role updates (e.g. Admin -> Viewer) take effect immediately in the active session. */
+  req.user = {
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+  };
   /* Everything downstream of this call — controllers, services, Mongoose hooks
      — can read who is acting, which is what fills created_by / updated_by. */
-  runWithRequestContext({ user_id: decoded.userId, role: decoded.role }, () => next());
+  runWithRequestContext({ user_id: user.id, role: user.role }, () => next());
 };
 
 export const requireRoles = (...allowedRoles: Role[]) => {
