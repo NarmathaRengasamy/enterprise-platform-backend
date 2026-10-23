@@ -540,6 +540,53 @@ describe('search (one aggregation)', () => {
     expect(slugs(await search({ search: 'hyundai' }))).toEqual(['hyundai-creta']); // name and brand
   });
 
+  it('restricts search results to the exact matching product when searching with complete product name', async () => {
+    await seed();
+    await post(app, {
+      name: { en: 'Hyundai Verna' },
+      brand: 'Hyundai',
+      category_ids: [cats.sedan.id],
+      items: [{ sku: 'VERNA', price: { amount_minor: 110000000 } }],
+    });
+
+    // 1. Searching by individual keyword 'hyundai' returns both products
+    const hyundaiResults = slugs(await search({ search: 'hyundai' }));
+    expect(hyundaiResults).toContain('hyundai-creta');
+    expect(hyundaiResults).toContain('hyundai-verna');
+
+    // 2. Searching with complete product name 'Hyundai Creta' restricts results strictly to exact matching product
+    const exactCretaResults = slugs(await search({ search: 'Hyundai Creta' }));
+    expect(exactCretaResults).toEqual(['hyundai-creta']);
+
+    // 3. Searching with complete product name 'Hyundai Verna' restricts results strictly to exact matching product
+    const exactVernaResults = slugs(await search({ search: 'Hyundai Verna' }));
+    expect(exactVernaResults).toEqual(['hyundai-verna']);
+
+    // 4. Searching complete name with hyphens, spacing differences, or brand + name
+    await post(app, {
+      name: { en: '6 inch multi color printed- special colors' },
+      brand: 'Peacock Tapes',
+      category_ids: [cats.sedan.id],
+      items: [{ sku: 'TAPE-6', price: { amount_minor: 50000 } }],
+    });
+    await post(app, {
+      name: { en: '3 inch multi color printed- special colors' },
+      brand: 'Peacock Tapes',
+      category_ids: [cats.sedan.id],
+      items: [{ sku: 'TAPE-3', price: { amount_minor: 30000 } }],
+    });
+    // With exact hyphen spacing as stored in DB
+    expect(slugs(await search({ search: '6 inch multi color printed- special colors' }))).toEqual(['6-inch-multi-color-printed-special-colors']);
+    // With standard space around hyphen: " - "
+    expect(slugs(await search({ search: '6 inch multi color printed - special colors' }))).toEqual(['6-inch-multi-color-printed-special-colors']);
+    // Without hyphen
+    expect(slugs(await search({ search: '6 inch multi color printed special colors' }))).toEqual(['6-inch-multi-color-printed-special-colors']);
+    // By slug
+    expect(slugs(await search({ search: '6-inch-multi-color-printed-special-colors' }))).toEqual(['6-inch-multi-color-printed-special-colors']);
+    // By Brand + Name
+    expect(slugs(await search({ search: 'Peacock Tapes 6 inch multi color printed - special colors' }))).toEqual(['6-inch-multi-color-printed-special-colors']);
+  });
+
   it('filters by category including sub-categories, brand and price range', async () => {
     await seed();
     const cars = (await request(app).post('/api/v1/catalog-categories').set(admin).send({ code: 'cars', name: { en: 'Cars' } })).body.data;

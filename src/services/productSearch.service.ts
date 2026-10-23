@@ -1,5 +1,6 @@
 import { AppError } from '../middlewares/errorHandler.js';
 import { ProductV2Model } from '../models/ProductV2.model.js';
+import { slugify } from './productV2.service.js';
 import { productTypeService } from './productType.service.js';
 import { catalogCategoryService } from './catalogCategory.service.js';
 import { resolvePrice } from './price.service.js';
@@ -267,6 +268,60 @@ export const productSearchService = {
     else if (filters.status && filters.status !== 'all' && filters.status !== 'deleted') first.status = filters.status;
     if (filters.brand?.trim()) first.brand = { $regex: `^${escapeRegex(filters.brand.trim())}$`, $options: 'i' };
     if (filters.category_id) first.category_ids = { $in: await withDescendants(filters.category_id) };
+
+    if (search) {
+      const cleanSearch = search.replace(/^["']|["']$/g, '').trim().replace(/\s+/g, ' ');
+      const words = cleanSearch.split(/[\s\-_/]+/).filter(Boolean);
+      const exactNameRegex = new RegExp(`^\\s*${escapeRegex(cleanSearch)}\\s*$`, 'i');
+      const slugCandidate = slugify(cleanSearch);
+
+      const exactMatchClauses: any[] = [
+        { 'name.en': exactNameRegex },
+        { 'name.ta': exactNameRegex },
+        { 'name.hi': exactNameRegex },
+        { slug: exactNameRegex },
+        ...(slugCandidate !== 'product' ? [{ slug: slugCandidate }] : []),
+      ];
+
+      if (words.length > 0) {
+        const flexPattern = `^\\s*` + words.map(escapeRegex).join(`[\\s\\-_/]+`) + `\\s*$`;
+        const flexRegex = new RegExp(flexPattern, 'i');
+        exactMatchClauses.push(
+          { 'name.en': flexRegex },
+          { 'name.ta': flexRegex },
+          { 'name.hi': flexRegex },
+          { slug: flexRegex },
+          {
+            $expr: {
+              $regexMatch: {
+                input: { $concat: [{ $ifNull: ['$brand', ''] }, ' ', { $ifNull: ['$name.en', ''] }] },
+                regex: flexPattern,
+                options: 'i',
+              },
+            },
+          },
+          {
+            $expr: {
+              $regexMatch: {
+                input: { $concat: [{ $ifNull: ['$name.en', ''] }, ' ', { $ifNull: ['$brand', ''] }] },
+                regex: flexPattern,
+                options: 'i',
+              },
+            },
+          }
+        );
+      }
+
+      const { $text, ...exactScope } = first;
+      const hasExactMatch = await ProductV2Model.exists({
+        ...exactScope,
+        $or: exactMatchClauses,
+      });
+
+      if (hasExactMatch) {
+        first.$or = exactMatchClauses;
+      }
+    }
 
     const attrFilters = Object.entries(filters.attributes ?? {})
       .filter(([, v]) => v?.length)
