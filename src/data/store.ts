@@ -8,6 +8,8 @@ import { ScheduleEventModel } from '../models/ScheduleEvent.model.js';
 import { AIAgentModel } from '../models/Agent.model.js';
 import { WebhookEndpointModel } from '../models/Endpoint.model.js';
 import { PlatformConnectionModel } from '../models/PlatformConnection.model.js';
+import { ProductV2Model } from '../models/ProductV2.model.js';
+import { CatalogCategoryModel } from '../models/CatalogCategory.model.js';
 import {
   User,
   Product,
@@ -788,9 +790,27 @@ class DataStore {
       this.getAgents(),
     ]);
 
-    const totalProducts = products.length;
-    const productsInStock = products.filter((p) => p.stockStatus === 'In Stock').length;
-    const productsLowStock = products.filter((p) => p.stockStatus === 'Low Stock').length;
+    let totalProducts = products.length;
+    let productsInStock = products.filter((p) => p.stockStatus === 'In Stock').length;
+    let productsLowStock = products.filter((p) => p.stockStatus === 'Low Stock').length;
+    let totalCategories = categories.length;
+
+    if (isDbConnected()) {
+      try {
+        const v2Count = await ProductV2Model.countDocuments({ is_deleted: false });
+        if (v2Count > 0) {
+          totalProducts = v2Count;
+          productsInStock = await ProductV2Model.countDocuments({ is_deleted: false, status: 'active' });
+        }
+        const v2CatCount = await CatalogCategoryModel.countDocuments({ is_deleted: false });
+        if (v2CatCount > 0) {
+          totalCategories = v2CatCount;
+        }
+      } catch {
+        /* Fall back to v1 / cache counts if query fails */
+      }
+    }
+
     const totalConversations = conversations.length;
     const unreadConversations = conversations.filter((c) => (c.unread || 0) > 0).length;
     const totalAppointments = scheduleEvents.length;
